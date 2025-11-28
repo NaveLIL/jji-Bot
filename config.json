@@ -1,0 +1,105 @@
+{
+    "guild_id": null,
+    "developer_id": null,
+    
+    "channels": {
+        "log_officer": null,
+        "log_recruit": null,
+        "log_economy": null,
+        "log_games": null,
+        "log_server": null,
+        "log_security": null,
+        "master_voice": null,
+        "ping_sergeant": null
+    },
+    
+    "roles": {
+        "soldier": null,
+        "sergeant": null,
+        "officer": null,
+        "admin": null
+    },
+    
+    "economy": {
+        "starting_budget": 50000,
+        "soldier_value": 10000,
+        "tax_rate": 10,
+        "min_bet": 1,
+        "max_bet": 10000,
+        "max_bet_percentage": 10
+    },
+    
+    "salaries": {
+        "soldier_per_10min": 10,
+        "sergeant_per_10min": 20,
+        "officer_per_10min": 20,
+        "sergeant_master_bonus": 50
+    },
+    
+    "prime_time": {
+        "start_hour": 14,
+        "end_hour": 22,
+        "timezone": "UTC"
+    },
+    
+    "case": {
+        "cooldown_hours": 24,
+        "empty_chance": 99,
+        "reward_weights": {
+            "low": {"range": [2, 5], "weight": 60},
+            "medium": {"range": [6, 10], "weight": 30},
+            "high": {"range": [11, 17], "weight": 10}
+        }
+    },
+    
+    "games": {
+        "blackjack": {
+            "deck_count": 6,
+            "penetration": 0.75,
+            "dealer_stands_soft_17": true,
+            "blackjack_payout": 1.5,
+            "insurance_payout": 2.0,
+            "max_splits": 3,
+            "allow_ace_resplit": false,
+            "allow_surrender": true
+        },
+        "coinflip": {
+            "edge_chance": 0.5,
+            "animation_duration": 3,
+            "cooldown_seconds": 30
+        }
+    },
+    
+    "rate_limits": {
+        "commands_per_minute": 3,
+        "games_per_minute": 10,
+        "transactions_per_minute": 5,
+        "game_cooldown_seconds": 30,
+        "violations_for_blacklist": 3,
+        "violations_for_kick": 5,
+        "blacklist_duration_hours": 1
+    },
+    
+    "security": {
+        "suspicious_bet_multiplier": 5,
+        "suspicious_transactions_per_hour": 100,
+        "auto_kick_on_exploit": true
+    },
+    
+    "mute_penalty": {
+        "enabled": true,
+        "percentage": 50
+    },
+    
+    "officer_system": {
+        "accept_reward": 20,
+        "pb_10h_bonus": 50,
+        "tracking_hours": 10
+    },
+    
+    "role_shop": {
+        "color_role_price": 100,
+        "max_active_roles": 5,
+        "sell_refund_percentage": 10
+    }
+}
