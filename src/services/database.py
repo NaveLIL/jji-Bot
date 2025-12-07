@@ -327,15 +327,34 @@ class DatabaseService:
                 economy.tax_rate = max(0, min(100, rate))
                 await session.commit()
     
-    async def set_soldier_value(self, value: float) -> None:
-        """Set soldier value for budget calculation"""
+    async def set_soldier_value(self, value: float) -> Tuple[float, float, int]:
+        """Set soldier value and recalculate budget. Returns (old_value, new_value, soldier_count)"""
         async with self.session() as session:
-            result = await session.execute(select(ServerEconomy))
+            result = await session.execute(select(ServerEconomy).with_for_update())
             economy = result.scalar_one_or_none()
             
             if economy:
+                old_value = economy.soldier_value
+                
+                # Count soldiers
+                soldier_count_result = await session.execute(
+                    select(func.count(User.id)).where(User.is_soldier == True)
+                )
+                soldier_count = soldier_count_result.scalar() or 0
+                
+                # Calculate budget difference
+                old_soldier_contribution = old_value * soldier_count
+                new_soldier_contribution = value * soldier_count
+                budget_diff = new_soldier_contribution - old_soldier_contribution
+                
+                # Update economy
                 economy.soldier_value = value
+                economy.total_budget += budget_diff
+                
                 await session.commit()
+                return old_value, value, soldier_count
+            
+            return 0, value, 0
     
     async def add_taxes_collected(self, amount: float) -> None:
         """Add to total taxes collected"""
@@ -492,6 +511,14 @@ class DatabaseService:
             user_role = UserRole(user_id=user.id, role_id=role.id)
             session.add(user_role)
             
+            # Add money to server budget (closed-loop economy)
+            economy_result = await session.execute(
+                select(ServerEconomy).with_for_update()
+            )
+            economy = economy_result.scalar_one_or_none()
+            if economy:
+                economy.total_budget += role.price
+            
             # Log transaction
             transaction = Transaction(
                 user_id=user.id,
@@ -543,8 +570,21 @@ class DatabaseService:
                 return False, "You don't own this role", 0
             
             refund = role.price * (refund_percentage / 100)
+            
+            # Check if server has enough budget for refund
+            economy_result = await session.execute(
+                select(ServerEconomy).with_for_update()
+            )
+            economy = economy_result.scalar_one_or_none()
+            if economy and economy.total_budget < refund:
+                return False, "Server budget too low for refund", 0
+            
             before_balance = user.balance
             user.balance += refund
+            
+            # Deduct refund from server budget (closed-loop economy)
+            if economy:
+                economy.total_budget -= refund
             
             await session.delete(user_role)
             

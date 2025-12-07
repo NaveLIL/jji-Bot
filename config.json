@@ -1,25 +1,22 @@
 {
-    "guild_id": null,
-    "developer_id": null,
-    
+    "guild_id": 1442073269749682179,
+    "developer_id": 349212500702658571,
     "channels": {
-        "log_officer": null,
-        "log_recruit": null,
-        "log_economy": null,
-        "log_games": null,
-        "log_server": null,
-        "log_security": null,
-        "master_voice": null,
-        "ping_sergeant": null
+        "log_officer": 1442156748130615316,
+        "log_recruit": 1442156744183910450,
+        "log_economy": 1442156749288378479,
+        "log_games": 1442156749288378479,
+        "log_server": 1442156746851225633,
+        "log_security": 1442156745370894515,
+        "master_voice": 1442156735065489580,
+        "ping_sergeant": 1442156786370089021
     },
-    
     "roles": {
-        "soldier": null,
-        "sergeant": null,
-        "officer": null,
-        "admin": null
+        "soldier": 1442156635111030794,
+        "sergeant": 1442156606799220970,
+        "officer": 1442156605142470796,
+        "admin": 1442156600415486062
     },
-    
     "economy": {
         "starting_budget": 50000,
         "soldier_value": 10000,
@@ -28,30 +25,44 @@
         "max_bet": 10000,
         "max_bet_percentage": 10
     },
-    
     "salaries": {
         "soldier_per_10min": 10,
         "sergeant_per_10min": 20,
         "officer_per_10min": 20,
         "sergeant_master_bonus": 50
     },
-    
     "prime_time": {
         "start_hour": 14,
         "end_hour": 22,
         "timezone": "UTC"
     },
-    
     "case": {
         "cooldown_hours": 24,
         "empty_chance": 99,
         "reward_weights": {
-            "low": {"range": [2, 5], "weight": 60},
-            "medium": {"range": [6, 10], "weight": 30},
-            "high": {"range": [11, 17], "weight": 10}
+            "low": {
+                "range": [
+                    2,
+                    5
+                ],
+                "weight": 60
+            },
+            "medium": {
+                "range": [
+                    6,
+                    10
+                ],
+                "weight": 30
+            },
+            "high": {
+                "range": [
+                    11,
+                    17
+                ],
+                "weight": 10
+            }
         }
     },
-    
     "games": {
         "blackjack": {
             "deck_count": 6,
@@ -69,7 +80,6 @@
             "cooldown_seconds": 30
         }
     },
-    
     "rate_limits": {
         "commands_per_minute": 3,
         "games_per_minute": 10,
@@ -79,24 +89,20 @@
         "violations_for_kick": 5,
         "blacklist_duration_hours": 1
     },
-    
     "security": {
         "suspicious_bet_multiplier": 5,
         "suspicious_transactions_per_hour": 100,
         "auto_kick_on_exploit": true
     },
-    
     "mute_penalty": {
         "enabled": true,
         "percentage": 50
     },
-    
     "officer_system": {
         "accept_reward": 20,
         "pb_10h_bonus": 50,
         "tracking_hours": 10
     },
-    
     "role_shop": {
         "color_role_price": 100,
         "max_active_roles": 5,

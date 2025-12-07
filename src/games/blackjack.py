@@ -513,6 +513,7 @@ class BlackjackGame:
         dealer_hidden = self.state in [GameState.PLAYER_TURN, GameState.INSURANCE_OFFERED]
         
         # Format dealer hand
+        dealer_cards_raw = [f"{c.rank}{c.suit}" for c in self.dealer_hand.cards]
         if dealer_hidden:
             dealer_display = self.dealer_hand.format_display(hide_first=True)
             dealer_value = "?"
@@ -533,20 +534,30 @@ class BlackjackGame:
                 value_str = f"{value} (soft)"
             
             bet_info = f"${hand.bet:.0f}"
+            bet_amount = hand.bet
             if hand.is_doubled:
                 bet_info = f"${hand.bet * 2:.0f} (doubled)"
+                bet_amount = hand.bet * 2
+            
+            cards_raw = [f"{c.rank}{c.suit}" for c in hand.cards]
             
             hands_display.append({
                 "prefix": prefix,
                 "cards": hand.format_display(),
+                "cards_list": cards_raw,
                 "value": value_str,
+                "value_numeric": value,
                 "bet": bet_info,
+                "bet_amount": bet_amount,
                 "is_current": i == self.current_hand_index,
-                "is_split": hand.is_split
+                "is_split": hand.is_split,
+                "is_bust": hand.is_bust,
+                "is_blackjack": hand.is_blackjack
             })
         
         return {
             "dealer_cards": dealer_display,
+            "dealer_cards_list": dealer_cards_raw,
             "dealer_value": dealer_value,
             "player_hands": hands_display,
             "state": self.state.value,

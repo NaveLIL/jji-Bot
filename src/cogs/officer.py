@@ -8,7 +8,7 @@ from discord.ext import commands
 
 from src.services.database import db
 from src.models.database import TransactionType
-from src.utils.helpers import format_balance, format_pb_time, load_config
+from src.utils.helpers import format_balance, format_pb_time, load_config, calculate_tax
 from src.utils.security import rate_limited, officer_only
 from src.utils.metrics import metrics
 from src.utils.logger import DiscordLogger
@@ -87,16 +87,21 @@ class OfficerCog(commands.Cog):
         # Log the recruitment
         await db.log_officer_accept(interaction.user.id, recruit.id)
         
-        # Give officer reward
+        # Calculate tax on officer reward
+        economy = await db.get_server_economy()
+        net_reward, tax = calculate_tax(accept_reward, economy.tax_rate)
+        
+        # Give officer reward (after tax)
         await db.update_user_balance(
             interaction.user.id,
-            accept_reward,
+            net_reward,
             TransactionType.OFFICER_REWARD,
+            tax_amount=tax,
             description=f"Recruitment reward for {recruit.display_name}"
         )
         
-        # Deduct from server budget
-        await db.add_rewards_paid(accept_reward)
+        # Deduct from server budget (only net amount - tax stays)
+        await db.add_rewards_paid(net_reward)
         
         # Update soldier count
         economy = await db.get_server_economy()
@@ -113,14 +118,27 @@ class OfficerCog(commands.Cog):
         
         metrics.track_transaction("officer_accept")
         
-        embed = discord.Embed(
-            title="🎖️ New Recruit Accepted!",
-            color=discord.Color.green()
-        )
-        embed.add_field(name="Officer", value=interaction.user.mention, inline=True)
-        embed.add_field(name="Recruit", value=recruit.mention, inline=True)
-        embed.add_field(name="Reward", value=format_balance(accept_reward), inline=True)
-        embed.set_footer(text="Track their 10h PB time for bonus reward • Developed by NaveL for JJI in 2025")
+        embed = discord.Embed(color=0x00FF00)
+        
+        embed.description = """
+## 🎖️ RECRUIT ACCEPTED
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+*A new soldier has joined our ranks!*
+"""
+        embed.add_field(name="👮 Officer", value=interaction.user.mention, inline=True)
+        embed.add_field(name="⚔️ Recruit", value=recruit.mention, inline=True)
+        
+        # Show reward with tax info
+        if tax > 0:
+            embed.add_field(
+                name="💰 Reward", 
+                value=f"```diff\n+ {format_balance(net_reward)}\n```\n`Gross: {format_balance(accept_reward)} | Tax: {format_balance(tax)}`", 
+                inline=False
+            )
+        else:
+            embed.add_field(name="💰 Reward", value=f"```diff\n+ {format_balance(net_reward)}\n```", inline=False)
+        
+        embed.set_footer(text="💎 Track their 10h SB for bonus • Developed by NaveL for JJI in 2025")
         
         await interaction.response.send_message(embed=embed)
     
@@ -135,26 +153,29 @@ class OfficerCog(commands.Cog):
         accept_reward = config.get("accept_reward", 20)
         pb_bonus = config.get("pb_10h_bonus", 50)
         
-        embed = discord.Embed(
-            title=f"👮 {interaction.user.display_name}'s Officer Stats",
-            color=discord.Color.blue()
-        )
+        embed = discord.Embed(color=0x3498DB)
+        
+        embed.description = f"""
+## 👮 OFFICER STATISTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+**{interaction.user.display_name}**
+"""
         
         embed.add_field(
             name="📊 Total Recruits",
-            value=str(stats["total_recruits"]),
+            value=f"```\n{stats['total_recruits']}\n```",
             inline=True
         )
         
         embed.add_field(
-            name="⏳ Pending 10h Bonuses",
-            value=str(stats["pending_rewards"]),
+            name="⏳ Pending Bonuses",
+            value=f"```\n{stats['pending_rewards']}\n```",
             inline=True
         )
         
         embed.add_field(
             name="✅ Claimed Bonuses",
-            value=str(stats["claimed_rewards"]),
+            value=f"```\n{stats['claimed_rewards']}\n```",
             inline=True
         )
         
@@ -163,16 +184,18 @@ class OfficerCog(commands.Cog):
         bonus_earnings = stats["claimed_rewards"] * pb_bonus
         total_earnings = accept_earnings + bonus_earnings
         
+        embed.add_field(name="", value="━━━━━━━━━━━━━━━━━━━━━━━━━━", inline=False)
+        
         embed.add_field(
             name="💰 Lifetime Earnings",
-            value=f"Accept rewards: {format_balance(accept_earnings)}\n"
-                  f"10h bonuses: {format_balance(bonus_earnings)}\n"
-                  f"**Total:** {format_balance(total_earnings)}",
+            value=f"📋 Accept Rewards: `{format_balance(accept_earnings)}`\n"
+                  f"🎁 10h Bonuses: `{format_balance(bonus_earnings)}`\n"
+                  f"**💎 Total: {format_balance(total_earnings)}**",
             inline=False
         )
         
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
-        embed.set_footer(text="Developed by NaveL for JJI in 2025")
+        embed.set_footer(text="💎 Developed by NaveL for JJI in 2025")
         
         await interaction.response.send_message(embed=embed)
     
@@ -207,11 +230,14 @@ class OfficerCog(commands.Cog):
         tracking_hours = config.get("tracking_hours", 10)
         required_seconds = tracking_hours * 3600
         
-        embed = discord.Embed(
-            title="📋 Your Recruits",
-            description=f"Showing last 10 recruits. Bonus awarded at {tracking_hours}h PB time.",
-            color=discord.Color.blue()
-        )
+        embed = discord.Embed(color=0x3498DB)
+        
+        embed.description = f"""
+## 📋 YOUR RECRUITS
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+*Showing last 10 recruits*
+💎 Bonus awarded at **{tracking_hours}h** SB time
+"""
         
         for log in logs:
             # Get recruit's current PB time
@@ -235,12 +261,12 @@ class OfficerCog(commands.Cog):
                     status = f"⏳ {progress:.1f}% ({pb_display})"
                 
                 embed.add_field(
-                    name=name,
-                    value=f"{status}\nJoined: <t:{int(log.accepted_at.timestamp())}:R>",
+                    name=f"⚔️ {name}",
+                    value=f"{status}\n<t:{int(log.accepted_at.timestamp())}:R>",
                     inline=True
                 )
         
-        embed.set_footer(text="Developed by NaveL for JJI in 2025")
+        embed.set_footer(text="💎 Developed by NaveL for JJI in 2025")
         
         await interaction.response.send_message(embed=embed)
 

@@ -8,33 +8,167 @@ from discord.ext import commands
 from typing import Optional
 
 from src.services.database import db
-from src.models.database import RoleType
-from src.utils.helpers import format_balance, load_config, parse_color_hex
+from src.models.database import RoleType, TransactionType
+from src.utils.helpers import format_balance, load_config, parse_color_hex, calculate_tax
 from src.utils.security import rate_limited, admin_only
 from src.utils.metrics import metrics
 
 
-class ShopView(discord.ui.View):
-    """Paginated shop view"""
+class BuyRoleButton(discord.ui.Button):
+    """Button to buy a specific role"""
     
-    def __init__(self, roles: list, page: int = 0, per_page: int = 5, timeout: float = 180):
+    def __init__(self, role_data, row: int = 0):
+        self.role_data = role_data
+        super().__init__(
+            label=f"${role_data.price:.0f}",
+            style=discord.ButtonStyle.success,
+            custom_id=f"buy_role:{role_data.discord_id}",
+            row=row
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        role_id = self.role_data.discord_id
+        price = self.role_data.price
+        role_name = self.role_data.name
+        
+        # Check if user already owns this role
+        user_roles = await db.get_user_roles(interaction.user.id)
+        if any(ur.role.discord_id == role_id for ur in user_roles):
+            await interaction.response.send_message(
+                f"❌ You already own **{role_name}**!",
+                ephemeral=True
+            )
+            return
+        
+        # Check balance
+        user = await db.get_or_create_user(interaction.user.id)
+        if user.balance < price:
+            await interaction.response.send_message(
+                f"❌ Insufficient balance! You need **{format_balance(price)}** but only have **{format_balance(user.balance)}**",
+                ephemeral=True
+            )
+            return
+        
+        # Purchase
+        success, message = await db.purchase_role(interaction.user.id, role_id)
+        
+        if success:
+            # Try to add the Discord role
+            role = interaction.guild.get_role(role_id)
+            role_added = False
+            if role:
+                try:
+                    await interaction.user.add_roles(role, reason="Role purchased from shop")
+                    role_added = True
+                except discord.Forbidden:
+                    pass
+                except Exception:
+                    pass
+            
+            embed = discord.Embed(
+                title="✅ PURCHASE SUCCESSFUL",
+                description=f"You bought **{role_name}** for **{format_balance(price)}**!",
+                color=0x00FF00
+            )
+            
+            if role_added:
+                embed.add_field(name="📌 Status", value="Role equipped automatically!", inline=False)
+            else:
+                embed.add_field(name="📌 Status", value="Use `/myroles` to equip it.", inline=False)
+            
+            new_balance = user.balance - price
+            embed.add_field(name="💰 New Balance", value=f"`{format_balance(new_balance)}`", inline=True)
+            embed.set_footer(text="💎 Developed by NaveL for JJI in 2025")
+            
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            metrics.track_transaction("role_purchase")
+        else:
+            await interaction.response.send_message(f"❌ {message}", ephemeral=True)
+
+
+class ShopView(discord.ui.View):
+    """Paginated shop view with buy buttons"""
+    
+    def __init__(self, roles: list, guild: discord.Guild, page: int = 0, per_page: int = 5, timeout: float = 300):
         super().__init__(timeout=timeout)
         self.roles = roles
+        self.guild = guild
         self.page = page
         self.per_page = per_page
         self.total_pages = max(1, (len(roles) + per_page - 1) // per_page)
-        self.update_buttons()
+        self._build_view()
     
-    def update_buttons(self):
-        self.prev_button.disabled = self.page <= 0
-        self.next_button.disabled = self.page >= self.total_pages - 1
+    def _build_view(self):
+        """Build the view with current page roles"""
+        self.clear_items()
+        
+        start = self.page * self.per_page
+        end = start + self.per_page
+        page_roles = self.roles[start:end]
+        
+        # Add buy buttons for each role (row 0-3)
+        for i, role in enumerate(page_roles[:4]):  # Max 4 buttons per row
+            self.add_item(BuyRoleButton(role, row=0))
+        
+        # Navigation buttons (row 4)
+        prev_btn = discord.ui.Button(
+            label="◀ Previous",
+            style=discord.ButtonStyle.secondary,
+            custom_id="shop:prev",
+            disabled=self.page <= 0,
+            row=4
+        )
+        prev_btn.callback = self.prev_page
+        self.add_item(prev_btn)
+        
+        next_btn = discord.ui.Button(
+            label="Next ▶",
+            style=discord.ButtonStyle.secondary,
+            custom_id="shop:next",
+            disabled=self.page >= self.total_pages - 1,
+            row=4
+        )
+        next_btn.callback = self.next_page
+        self.add_item(next_btn)
+        
+        refresh_btn = discord.ui.Button(
+            label="🔄 Refresh",
+            style=discord.ButtonStyle.primary,
+            custom_id="shop:refresh",
+            row=4
+        )
+        refresh_btn.callback = self.refresh
+        self.add_item(refresh_btn)
+    
+    async def prev_page(self, interaction: discord.Interaction):
+        if self.page > 0:
+            self.page -= 1
+        self._build_view()
+        await interaction.response.edit_message(embed=self.get_embed(), view=self)
+    
+    async def next_page(self, interaction: discord.Interaction):
+        if self.page < self.total_pages - 1:
+            self.page += 1
+        self._build_view()
+        await interaction.response.edit_message(embed=self.get_embed(), view=self)
+    
+    async def refresh(self, interaction: discord.Interaction):
+        # Reload roles from database
+        self.roles = await db.get_all_roles(available_only=True)
+        self.total_pages = max(1, (len(self.roles) + self.per_page - 1) // self.per_page)
+        if self.page >= self.total_pages:
+            self.page = self.total_pages - 1
+        self._build_view()
+        await interaction.response.edit_message(embed=self.get_embed(), view=self)
     
     def get_embed(self) -> discord.Embed:
-        embed = discord.Embed(
-            title="🛒 Role Shop",
-            description="Purchase roles to customize your profile!",
-            color=discord.Color.purple()
-        )
+        embed = discord.Embed(color=0x9B59B6)
+        
+        embed.description = """
+## 🛒 ROLE MARKETPLACE
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+*Click a button below to purchase!*
+"""
         
         start = self.page * self.per_page
         end = start + self.per_page
@@ -42,37 +176,30 @@ class ShopView(discord.ui.View):
         
         if not page_roles:
             embed.add_field(
-                name="No Roles Available",
-                value="The shop is empty!",
+                name="📭 Empty Shop",
+                value="```\nNo roles available!\n```",
                 inline=False
             )
         else:
-            for role in page_roles:
+            for i, role in enumerate(page_roles):
                 type_emoji = "🎨" if role.role_type == RoleType.COLOR else "⭐"
-                color_info = f" ({role.color_hex})" if role.color_hex else ""
+                
+                # Get Discord role for preview
+                discord_role = self.guild.get_role(role.discord_id) if self.guild else None
+                color_preview = ""
+                if discord_role and discord_role.color.value:
+                    color_preview = f" • {discord_role.mention}"
+                elif role.color_hex:
+                    color_preview = f" `{role.color_hex}`"
                 
                 embed.add_field(
-                    name=f"{type_emoji} {role.name}{color_info}",
-                    value=f"**Price:** {format_balance(role.price)}\n**ID:** `{role.discord_id}`",
+                    name=f"{type_emoji} {role.name}",
+                    value=f"**{format_balance(role.price)}**{color_preview}",
                     inline=True
                 )
         
-        embed.set_footer(text=f"Page {self.page + 1}/{self.total_pages} • Use /buyrole <role_id> to purchase")
+        embed.set_footer(text=f"Page {self.page + 1}/{self.total_pages} • 💎 Developed by NaveL for JJI in 2025")
         return embed
-    
-    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, custom_id="shop:prev")
-    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.page > 0:
-            self.page -= 1
-        self.update_buttons()
-        await interaction.response.edit_message(embed=self.get_embed(), view=self)
-    
-    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, custom_id="shop:next")
-    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.page < self.total_pages - 1:
-            self.page += 1
-        self.update_buttons()
-        await interaction.response.edit_message(embed=self.get_embed(), view=self)
 
 
 class InventoryView(discord.ui.View):
@@ -228,35 +355,81 @@ class InventoryView(discord.ui.View):
         )
         
         if success:
-            await interaction.response.send_message(
-                f"✅ {message}\nYou received {format_balance(refund)}",
-                ephemeral=True
-            )
+            # Apply tax to role sale refund
+            economy = await db.get_server_economy()
+            net_refund, tax = calculate_tax(refund, economy.tax_rate)
+            
+            # Tax was not applied in db.sell_role, we need to adjust
+            # Deduct tax from user and add to server budget
+            if tax > 0:
+                await db.update_user_balance(
+                    interaction.user.id,
+                    -tax,
+                    TransactionType.TAX,
+                    description="Tax on role sale"
+                )
+                await db.add_taxes_collected(tax)
+            
+            if tax > 0:
+                await interaction.response.send_message(
+                    f"✅ {message}\nGross: {format_balance(refund)} | Tax: {format_balance(tax)}\n**Net received: {format_balance(net_refund)}**",
+                    ephemeral=True
+                )
+            else:
+                await interaction.response.send_message(
+                    f"✅ {message}\nYou received {format_balance(refund)}",
+                    ephemeral=True
+                )
             metrics.track_transaction("role_sell")
         else:
             await interaction.response.send_message(f"❌ {message}", ephemeral=True)
     
     def get_embed(self) -> discord.Embed:
-        embed = discord.Embed(
-            title=f"🎒 {self.discord_user.display_name}'s Inventory",
-            color=discord.Color.purple()
-        )
+        embed = discord.Embed(color=0x9B59B6)
+        
+        embed.description = f"""
+## 🎒 INVENTORY
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+**{self.discord_user.display_name}**'s Role Collection
+"""
         
         if not self.user_roles:
-            embed.description = "Your inventory is empty! Visit /shop to buy roles."
+            embed.add_field(
+                name="📭 Empty Inventory",
+                value="```\nNo roles owned!\n```\nVisit `/shop` to browse roles.",
+                inline=False
+            )
         else:
             active = [ur for ur in self.user_roles if ur.is_active]
             inactive = [ur for ur in self.user_roles if not ur.is_active]
             
             if active:
-                active_text = "\n".join(f"✅ {ur.role.name}" for ur in active)
-                embed.add_field(name="Equipped", value=active_text, inline=True)
+                active_lines = []
+                for ur in active:
+                    active_lines.append(f"• **{ur.role.name}**")
+                embed.add_field(
+                    name=f"✅ Equipped ({len(active)})",
+                    value="\n".join(active_lines) or "None",
+                    inline=True
+                )
             
             if inactive:
-                inactive_text = "\n".join(f"❌ {ur.role.name}" for ur in inactive)
-                embed.add_field(name="Unequipped", value=inactive_text, inline=True)
+                inactive_lines = []
+                for ur in inactive:
+                    inactive_lines.append(f"• {ur.role.name}")
+                embed.add_field(
+                    name=f"❌ Unequipped ({len(inactive)})",
+                    value="\n".join(inactive_lines) or "None",
+                    inline=True
+                )
+            
+            embed.add_field(
+                name="",
+                value=f"📊 **Total Roles:** {len(self.user_roles)}",
+                inline=False
+            )
         
-        embed.set_footer(text="Select a role below to manage it")
+        embed.set_footer(text="Select a role below to manage • Developed by NaveL for JJI in 2025")
         return embed
 
 
@@ -270,10 +443,10 @@ class MarketplaceCog(commands.Cog):
     @app_commands.command(name="shop", description="View the role shop")
     @rate_limited("economy", limit=5, window=60)
     async def shop(self, interaction: discord.Interaction):
-        """Display role shop"""
+        """Display role shop with buy buttons"""
         roles = await db.get_all_roles(available_only=True)
         
-        view = ShopView(roles)
+        view = ShopView(roles, interaction.guild)
         await interaction.response.send_message(embed=view.get_embed(), view=view)
     
     @app_commands.command(name="buyrole", description="Purchase a role from the shop")

@@ -28,17 +28,40 @@ class EconomyCog(commands.Cog):
         """Show user's balance"""
         user = await db.get_or_create_user(interaction.user.id)
         
+        # Get rank on leaderboard
+        all_users = await db.get_leaderboard("balance", limit=1000)
+        rank = next((i + 1 for i, u in enumerate(all_users) if u.discord_id == interaction.user.id), None)
+        rank_text = f"#{rank}" if rank else "Unranked"
+        
+        # Get role count separately to avoid DetachedInstanceError
+        user_roles = await db.get_user_roles(interaction.user.id)
+        role_count = len(user_roles) if user_roles else 0
+        
         embed = discord.Embed(
-            title="💰 Balance",
-            color=discord.Color.gold()
+            title="",
+            color=0x2B2D31
         )
-        embed.add_field(
+        
+        # Header with balance
+        embed.description = f"""
+## 💰 YOUR BALANCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+```diff\n+ {format_balance(user.balance)}\n```
+"""
+        
+        embed.set_author(
             name=interaction.user.display_name,
-            value=format_balance(user.balance),
-            inline=False
+            icon_url=interaction.user.display_avatar.url
         )
-        embed.set_thumbnail(url=interaction.user.display_avatar.url)
-        embed.set_footer(text="Developed by NaveL for JJI in 2025")
+        
+        sb_hours = user.total_pb_time // 3600
+        sb_mins = (user.total_pb_time % 3600) // 60
+        
+        embed.add_field(name="📊 Rank", value=f"`{rank_text}`", inline=True)
+        embed.add_field(name="⏱️ SB Time", value=f"`{sb_hours}h {sb_mins}m`", inline=True)
+        embed.add_field(name="🎒 Roles", value=f"`{role_count}`", inline=True)
+        
+        embed.set_footer(text="💎 Developed by NaveL for JJI in 2025")
         
         await interaction.response.send_message(embed=embed)
     
@@ -124,15 +147,46 @@ class EconomyCog(commands.Cog):
             metrics.track_tax(tax_amount)
         
         embed = discord.Embed(
-            title="💸 Transfer Complete",
-            color=discord.Color.green()
+            title="",
+            color=0x57F287  # Green
         )
-        embed.add_field(name="Sent", value=format_balance(amount), inline=True)
-        embed.add_field(name="Tax", value=f"{format_balance(tax_amount)} ({economy.tax_rate}%)", inline=True)
-        embed.add_field(name="Received", value=format_balance(net_amount), inline=True)
-        embed.add_field(name="To", value=user.mention, inline=True)
-        embed.add_field(name="Your Balance", value=format_balance(after), inline=True)
-        embed.set_footer(text="Developed by NaveL for JJI in 2025")
+        
+        embed.description = f"""
+## 💸 Transfer Complete
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+        
+        embed.add_field(
+            name="📤 Sent", 
+            value=f"```\n{format_balance(amount)}\n```", 
+            inline=True
+        )
+        embed.add_field(
+            name="💼 Tax", 
+            value=f"```\n{format_balance(tax_amount)} ({economy.tax_rate:.0f}%)\n```", 
+            inline=True
+        )
+        embed.add_field(
+            name="📥 Received", 
+            value=f"```diff\n+ {format_balance(net_amount)}\n```", 
+            inline=True
+        )
+        
+        embed.add_field(name="", value="━━━━━━━━━━━━━━━━━━━━━━━━━━", inline=False)
+        
+        embed.add_field(
+            name="👤 Recipient", 
+            value=user.mention, 
+            inline=True
+        )
+        embed.add_field(
+            name="💰 Your Balance", 
+            value=f"`{format_balance(after)}`", 
+            inline=True
+        )
+        
+        embed.set_footer(text="💎 Developed by NaveL for JJI in 2025")
         
         await interaction.response.send_message(embed=embed)
     
@@ -207,17 +261,26 @@ class EconomyCog(commands.Cog):
             if tax > 0:
                 await db.add_taxes_collected(tax)
             
-            result_text = f"🎉 **You won {format_balance(reward)}!**\nAfter tax: {format_balance(net_reward)}"
-            color = discord.Color.gold()
+            if reward >= 10:
+                result_text = f"# 🎉 JACKPOT!\n\n**You won {format_balance(reward)}!**\nAfter tax ({economy.tax_rate:.0f}%): `{format_balance(net_reward)}`"
+                color = 0xFEE75C  # Gold
+            else:
+                result_text = f"## 🎁 Winner!\n\n**You won {format_balance(reward)}!**\nAfter tax: `{format_balance(net_reward)}`"
+                color = 0x57F287  # Green
             
             metrics.track_transaction("case_win")
         
         embed = discord.Embed(
-            title="📦 Case Opened!",
             description=result_text,
             color=color
         )
-        embed.set_footer(text=f"Next case available in {cooldown_hours}h • Developed by NaveL for JJI in 2025")
+        
+        # Add case visual
+        if reward == 0:
+            embed.set_thumbnail(url="https://cdn.discordapp.com/emojis/1234567890.png")  # Empty box
+        
+        embed.set_author(name="📦 Daily Case", icon_url=interaction.user.display_avatar.url)
+        embed.set_footer(text=f"⏰ Next case in {cooldown_hours}h • 💎 Developed by NaveL for JJI in 2025")
         
         await interaction.response.send_message(embed=embed)
     

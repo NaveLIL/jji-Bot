@@ -1,6 +1,6 @@
 """
 SQLAlchemy 2.0 Database Models
-Production-grade Discord Bot for JJI Regiment
+Discord Bot for JJI Squad
 """
 
 from datetime import datetime

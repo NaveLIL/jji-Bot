@@ -26,8 +26,11 @@ def save_config(config: dict, path: str = "config.json") -> None:
 
 
 def format_balance(amount: float) -> str:
-    """Format balance with dollar sign and 2 decimal places"""
-    return f"${amount:,.2f}"
+    """Format balance with dollar sign - clean format without unnecessary decimals"""
+    if amount == int(amount):
+        return f"${int(amount)}"
+    else:
+        return f"${amount:.2f}"
 
 
 def format_time(seconds: int) -> str:
@@ -52,7 +55,7 @@ def format_time(seconds: int) -> str:
 
 
 def format_pb_time(seconds: int) -> str:
-    """Format PB time with full labels"""
+    """Format SB (Squad Battles) time with full labels"""
     if seconds == 0:
         return "0 hours"
     

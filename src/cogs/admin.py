@@ -70,14 +70,22 @@ class SoldierValueModal(discord.ui.Modal, title="Set Soldier Value"):
                 )
                 return
             
-            await db.set_soldier_value(value)
+            old_value, new_value, soldier_count = await db.set_soldier_value(value)
             
             config = load_config()
             config["economy"]["soldier_value"] = value
             save_config(config)
             
+            # Calculate budget change
+            budget_change = (new_value - old_value) * soldier_count
+            change_str = f"+{format_balance(budget_change)}" if budget_change >= 0 else format_balance(budget_change)
+            
             await interaction.response.send_message(
-                f"✅ Soldier value set to **{format_balance(value)}**",
+                f"✅ Soldier value updated!\n\n"
+                f"**Old Value:** {format_balance(old_value)}\n"
+                f"**New Value:** {format_balance(new_value)}\n"
+                f"**Soldiers:** {soldier_count}\n"
+                f"**Budget Change:** {change_str}",
                 ephemeral=True
             )
         except ValueError:
@@ -311,69 +319,82 @@ class EconomyPanelView(discord.ui.View):
         economy = await db.get_server_economy()
         config = load_config()
         
-        embed = discord.Embed(
-            title="⚙️ Economy Control Panel",
-            color=discord.Color.gold()
-        )
+        embed = discord.Embed(color=0xFFD700)
+        
+        embed.description = """
+## ⚙️ ECONOMY CONTROL PANEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
         
         # Budget section
         embed.add_field(
-            name="💵 Server Budget",
-            value=format_balance(economy.total_budget),
+            name="🏦 Server Budget",
+            value=f"```diff\n+ {format_balance(economy.total_budget)}\n```",
             inline=True
         )
         
         embed.add_field(
             name="📈 Tax Rate",
-            value=f"{economy.tax_rate}%",
+            value=f"```\n{economy.tax_rate}%\n```",
             inline=True
         )
         
         embed.add_field(
             name="👤 Soldier Value",
-            value=format_balance(economy.soldier_value),
+            value=f"```\n{format_balance(economy.soldier_value)}\n```",
             inline=True
         )
+        
+        embed.add_field(name="", value="━━━━━━━━━━━━━━━━━━━━━━━━━━", inline=False)
         
         # Prime time
         prime = config.get("prime_time", {})
         embed.add_field(
             name="⏰ Prime Time",
-            value=f"{prime.get('start_hour', 14)}:00 - {prime.get('end_hour', 22)}:00 UTC",
+            value=f"`{prime.get('start_hour', 14)}:00 - {prime.get('end_hour', 22)}:00 UTC`",
             inline=True
         )
         
         # Salaries
         salaries = config.get("salaries", {})
         embed.add_field(
-            name="💰 Salaries (per 10min)",
-            value=f"Soldier: ${salaries.get('soldier_per_10min', 10)}\n"
-                  f"Sergeant: ${salaries.get('sergeant_per_10min', 20)}\n"
-                  f"Officer: ${salaries.get('officer_per_10min', 20)}",
+            name="💰 Salaries (/10min)",
+            value=f"⚔️ `${salaries.get('soldier_per_10min', 10)}`\n"
+                  f"🎖️ `${salaries.get('sergeant_per_10min', 20)}`\n"
+                  f"👮 `${salaries.get('officer_per_10min', 20)}`",
             inline=True
         )
         
         # Totals
+        total_users = await db.get_total_users()
         embed.add_field(
-            name="🏦 Taxes Collected",
-            value=format_balance(economy.total_taxes_collected),
+            name="👥 Total Users",
+            value=f"```\n{total_users:,}\n```",
+            inline=True
+        )
+        
+        embed.add_field(name="", value="━━━━━━━━━━━━━━━━━━━━━━━━━━", inline=False)
+        
+        embed.add_field(
+            name="🏛️ Taxes Collected",
+            value=f"`{format_balance(economy.total_taxes_collected)}`",
             inline=True
         )
         
         embed.add_field(
             name="💸 Rewards Paid",
-            value=format_balance(economy.total_rewards_paid),
+            value=f"`{format_balance(economy.total_rewards_paid)}`",
             inline=True
         )
         
-        total_users = await db.get_total_users()
+        total_balance = await db.get_total_balance()
         embed.add_field(
-            name="👥 Total Users",
-            value=str(total_users),
+            name="💰 User Balances",
+            value=f"`{format_balance(total_balance)}`",
             inline=True
         )
         
-        embed.set_footer(text="Click buttons below to modify settings • Developed by NaveL for JJI in 2025")
+        embed.set_footer(text="💎 Click buttons to modify • Developed by NaveL for JJI in 2025")
         
         return embed
 
@@ -444,7 +465,17 @@ class AdminCog(commands.Cog):
         user: discord.Member,
         amount: float
     ):
-        """Add to user balance"""
+        """Add to user balance - deducts from server budget"""
+        # Check server budget if adding money
+        if amount > 0:
+            economy = await db.get_server_economy()
+            if economy.total_budget < amount:
+                await interaction.response.send_message(
+                    f"❌ Server budget too low! Budget: **{format_balance(economy.total_budget)}**, Need: **{format_balance(amount)}**",
+                    ephemeral=True
+                )
+                return
+        
         success, before, after = await db.update_user_balance(
             user.id,
             amount,
@@ -453,6 +484,12 @@ class AdminCog(commands.Cog):
         )
         
         if success:
+            # Deduct from server budget if adding, add to budget if removing
+            if amount > 0:
+                await db.update_server_budget(-amount)  # Take from server budget
+                await db.add_rewards_paid(amount)
+            # If amount < 0, money goes back to server (no action needed, just stays in user's negative)
+            
             await interaction.response.send_message(
                 f"✅ Added **{format_balance(amount)}** to **{user.display_name}**\n"
                 f"Before: {format_balance(before)} → After: {format_balance(after)}",
@@ -640,44 +677,100 @@ class AdminCog(commands.Cog):
             ephemeral=True
         )
     
+    @app_commands.command(name="set_user_rank", description="Set a user's rank (soldier/sergeant/officer) (Admin)")
+    @app_commands.describe(
+        user="The user to modify",
+        rank="The rank to assign"
+    )
+    @admin_only()
+    async def set_user_rank(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        rank: Literal["soldier", "sergeant", "officer", "none"]
+    ):
+        """Set user's rank in the system"""
+        is_soldier = rank in ["soldier", "sergeant", "officer"]
+        is_sergeant = rank in ["sergeant", "officer"]
+        is_officer = rank == "officer"
+        
+        await db.update_user_roles(
+            user.id,
+            is_soldier=is_soldier,
+            is_sergeant=is_sergeant,
+            is_officer=is_officer
+        )
+        
+        rank_emoji = {"soldier": "⚔️", "sergeant": "🎖️", "officer": "👮", "none": "❌"}
+        
+        await interaction.response.send_message(
+            f"✅ Set **{user.display_name}** rank to {rank_emoji.get(rank, '')} **{rank.upper()}**\n"
+            f"• Soldier: {'✅' if is_soldier else '❌'}\n"
+            f"• Sergeant: {'✅' if is_sergeant else '❌'}\n"
+            f"• Officer: {'✅' if is_officer else '❌'}",
+            ephemeral=True
+        )
+    
     @app_commands.command(name="about", description="About this bot")
     async def about(self, interaction: discord.Interaction):
         """Display bot information"""
-        embed = discord.Embed(
-            title="🤖 JJI Regiment Bot",
-            description="A production-grade Discord bot for military gaming community management.",
-            color=discord.Color.blurple()
-        )
+        embed = discord.Embed(color=0x5865F2)
+        
+        embed.description = """
+## 🤖 JJI SQUAD BOT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+*Discord bot for gaming community*
+"""
         
         embed.add_field(
             name="📋 Features",
-            value="• Economy system with salaries\n"
-                  "• Role shop & marketplace\n"
-                  "• Games (Blackjack, Coinflip)\n"
-                  "• Officer recruitment system\n"
-                  "• Prime time PB tracking",
+            value="```\n"
+                  "• Economy & Salaries\n"
+                  "• Role Marketplace\n"
+                  "• Casino Games\n"
+                  "• Officer System\n"
+                  "• SB Time Tracking\n"
+                  "```",
             inline=True
         )
         
         embed.add_field(
-            name="⚙️ Commands",
-            value="`/balance` - Check balance\n"
-                  "`/profile` - View profile\n"
-                  "`/shop` - Role shop\n"
-                  "`/blackjack` - Play blackjack\n"
-                  "`/coinflip` - Flip a coin",
+            name="🎮 Game Commands",
+            value="`/blackjack` Solo or PvP\n"
+                  "`/blackjack_pvp` PvP Mode\n"
+                  "`/coinflip` Flip coins\n"
+                  "`/case` Daily reward",
             inline=True
         )
+        
+        embed.add_field(
+            name="💼 Economy Commands",
+            value="`/balance` Check wallet\n"
+                  "`/pay` Send money\n"
+                  "`/shop` Browse roles\n"
+                  "`/myroles` Inventory",
+            inline=True
+        )
+        
+        embed.add_field(name="", value="━━━━━━━━━━━━━━━━━━━━━━━━━━", inline=False)
         
         embed.add_field(
             name="👮 Officer Commands",
-            value="`/accept` - Accept recruit\n"
-                  "`/officer_stats` - View stats\n"
-                  "`/recruits` - View recruits",
+            value="`/accept` Accept recruit\n"
+                  "`/officer_stats` View stats\n"
+                  "`/recruits` Track recruits",
             inline=True
         )
         
-        embed.set_footer(text="Developed by NaveL for JJI in 2025")
+        embed.add_field(
+            name="📊 Profile Commands",
+            value="`/profile` View profile\n"
+                  "`/leaderboard` Rankings\n"
+                  "`/stats` Server economy",
+            inline=True
+        )
+        
+        embed.set_footer(text="💎 Developed by NaveL for JJI in 2025")
         
         await interaction.response.send_message(embed=embed)
     
@@ -692,39 +785,52 @@ class AdminCog(commands.Cog):
         total_users = await db.get_total_users()
         total_balance = await db.get_total_balance()
         
-        embed = discord.Embed(
-            title="📊 Bot Statistics",
-            color=discord.Color.green()
-        )
+        embed = discord.Embed(color=0x00FF00)
+        
+        embed.description = """
+## 📊 BOT STATISTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
         
         # Bot info
+        latency = round(self.bot.latency * 1000)
+        latency_color = "+" if latency < 100 else ""
+        
         embed.add_field(
-            name="🤖 Bot",
-            value=f"Latency: {round(self.bot.latency * 1000)}ms\n"
-                  f"Guilds: {len(self.bot.guilds)}\n"
-                  f"Uptime: {str(uptime).split('.')[0] if uptime else 'N/A'}",
+            name="🤖 Bot Status",
+            value=f"```diff\n{latency_color} {latency}ms latency\n```\n"
+                  f"**Guilds:** `{len(self.bot.guilds)}`\n"
+                  f"**Uptime:** `{str(uptime).split('.')[0] if uptime else 'N/A'}`",
             inline=True
         )
         
         # Economy
         embed.add_field(
             name="💰 Economy",
-            value=f"Budget: {format_balance(economy.total_budget)}\n"
-                  f"Tax Rate: {economy.tax_rate}%\n"
-                  f"Total User Balance: {format_balance(total_balance)}",
+            value=f"**Budget:** `{format_balance(economy.total_budget)}`\n"
+                  f"**Tax Rate:** `{economy.tax_rate}%`\n"
+                  f"**User Balance:** `{format_balance(total_balance)}`",
             inline=True
         )
         
         # Users
         embed.add_field(
-            name="👥 Users",
-            value=f"Total: {total_users}\n"
-                  f"Taxes Collected: {format_balance(economy.total_taxes_collected)}\n"
-                  f"Rewards Paid: {format_balance(economy.total_rewards_paid)}",
+            name="👥 Community",
+            value=f"**Users:** `{total_users:,}`\n"
+                  f"**Taxes:** `{format_balance(economy.total_taxes_collected)}`\n"
+                  f"**Rewards:** `{format_balance(economy.total_rewards_paid)}`",
             inline=True
         )
         
-        embed.set_footer(text="Developed by NaveL for JJI in 2025")
+        # Total money in circulation
+        total_money = economy.total_budget + total_balance
+        embed.add_field(
+            name="💎 Total Economy",
+            value=f"```\n{format_balance(total_money)}\n```",
+            inline=False
+        )
+        
+        embed.set_footer(text="💎 Developed by NaveL for JJI in 2025")
         
         await interaction.response.send_message(embed=embed)
 
