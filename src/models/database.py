@@ -45,6 +45,7 @@ class TransactionType(str, Enum):
 class RoleType(str, Enum):
     """Types of purchasable roles"""
     COLOR = "color"
+    NAME = "name"
     CUSTOM = "custom"
 
 

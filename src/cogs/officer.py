@@ -7,6 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from src.services.database import db
+from src.services.economy_logger import economy_logger, EconomyAction
 from src.models.database import TransactionType
 from src.utils.helpers import format_balance, format_pb_time, load_config, calculate_tax
 from src.utils.security import rate_limited, officer_only
@@ -89,19 +90,44 @@ class OfficerCog(commands.Cog):
         
         # Calculate tax on officer reward
         economy = await db.get_server_economy()
+        officer = await db.get_or_create_user(interaction.user.id)
+        officer_before = officer.balance
+        budget_before = economy.total_budget
         net_reward, tax = calculate_tax(accept_reward, economy.tax_rate)
         
-        # Give officer reward (after tax)
+        # Give officer reward (after tax) - tax already deducted in net_reward
         await db.update_user_balance(
             interaction.user.id,
             net_reward,
             TransactionType.OFFICER_REWARD,
-            tax_amount=tax,
+            tax_amount=0,  # Tax already calculated in net_reward
             description=f"Recruitment reward for {recruit.display_name}"
         )
         
         # Deduct from server budget (only net amount - tax stays)
         await db.add_rewards_paid(net_reward)
+        
+        # Log recruitment reward
+        officer_after = await db.get_or_create_user(interaction.user.id)
+        economy_after = await db.get_server_economy()
+        await economy_logger.log(
+            action=EconomyAction.USER_REWARD,
+            amount=net_reward,
+            user_id=interaction.user.id,
+            user_name=interaction.user.display_name,
+            before_balance=officer_before,
+            after_balance=officer_after.balance,
+            before_budget=budget_before,
+            after_budget=economy_after.total_budget,
+            description=f"Recruitment reward for accepting {recruit.display_name}",
+            details={
+                "Recruit": f"<@{recruit.id}>",
+                "Gross Reward": f"${accept_reward:,.2f}",
+                "Tax": f"${tax:,.2f}",
+                "Net Reward": f"${net_reward:,.2f}"
+            },
+            source="Officer Accept"
+        )
         
         # Update soldier count
         economy = await db.get_server_economy()

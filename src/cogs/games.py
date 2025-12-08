@@ -13,6 +13,7 @@ import random
 
 from src.services.database import db
 from src.services.cache import cache
+from src.services.economy_logger import economy_logger, EconomyAction
 from src.models.database import TransactionType, GameType
 from src.games.blackjack import create_blackjack_game, BlackjackGame, GameState
 from src.games.coinflip import create_coinflip_game, CoinflipResult, CoinSide
@@ -389,6 +390,12 @@ class EnhancedBlackjackView(discord.ui.View):
     async def finish_game(self):
         net_result = self.game.get_net_result()
         
+        # Get state before any changes
+        user = await db.get_or_create_user(self.game.user_id)
+        economy = await db.get_server_economy()
+        user_before = user.balance
+        budget_before = economy.total_budget
+        
         if net_result != 0:
             if net_result > 0:
                 # Player wins - calculate tax only on PROFIT, not on bet return
@@ -416,9 +423,49 @@ class EnhancedBlackjackView(discord.ui.View):
                     metrics.track_tax(tax)
                 
                 metrics.track_game("blackjack", "win", self.bet)
+                
+                # Log game result
+                economy_after = await db.get_server_economy()
+                user_after = await db.get_or_create_user(self.game.user_id)
+                await economy_logger.log_game(
+                    game_name="Blackjack",
+                    user_id=self.game.user_id,
+                    user_name=str(self.game.user_id),
+                    bet=self.bet,
+                    result="WIN",
+                    winnings=total_payout,
+                    profit=net_profit,
+                    user_before=user_before,
+                    user_after=user_after.balance,
+                    budget_before=budget_before,
+                    budget_after=economy_after.total_budget,
+                    details={
+                        "Gross Profit": f"${profit_amount:,.2f}",
+                        "Tax": f"${tax:,.2f}",
+                        "Net Profit": f"${net_profit:,.2f}",
+                        "Total Payout": f"${total_payout:,.2f}"
+                    }
+                )
             else:
                 # Player loses - money stays in server budget (already added when bet placed)
                 metrics.track_game("blackjack", "lose", self.bet)
+                
+                # Log game result
+                economy_after = await db.get_server_economy()
+                await economy_logger.log_game(
+                    game_name="Blackjack",
+                    user_id=self.game.user_id,
+                    user_name=str(self.game.user_id),
+                    bet=self.bet,
+                    result="LOSS",
+                    winnings=0,
+                    profit=-self.bet,
+                    user_before=user_before,
+                    user_after=user_before,  # Balance unchanged (bet already deducted)
+                    budget_before=budget_before,
+                    budget_after=economy_after.total_budget,
+                    details={"Bet Lost": f"${self.bet:,.2f}"}
+                )
         else:
             # Push - refund bet from server budget (no tax on refund)
             await db.update_server_budget(-self.bet)
@@ -429,6 +476,24 @@ class EnhancedBlackjackView(discord.ui.View):
                 description="Blackjack push - refund"
             )
             metrics.track_game("blackjack", "push", self.bet)
+            
+            # Log game result
+            economy_after = await db.get_server_economy()
+            user_after = await db.get_or_create_user(self.game.user_id)
+            await economy_logger.log_game(
+                game_name="Blackjack",
+                user_id=self.game.user_id,
+                user_name=str(self.game.user_id),
+                bet=self.bet,
+                result="PUSH",
+                winnings=self.bet,
+                profit=0,
+                user_before=user_before,
+                user_after=user_after.balance,
+                budget_before=budget_before,
+                budget_after=economy_after.total_budget,
+                details={"Refunded": f"${self.bet:,.2f}"}
+            )
         
         await cache.delete_game_state(self.game.user_id, "blackjack")
         self.update_buttons()
@@ -494,6 +559,7 @@ class DoubleButton(discord.ui.Button):
             return
         
         await db.update_user_balance(view.game.user_id, -double_cost, TransactionType.GAME_LOSS, description="Blackjack double down")
+        await db.update_server_budget(double_cost)  # Add to server budget
         view.game.double_down()
         await view.update_game(interaction)
 
@@ -519,6 +585,7 @@ class SplitButton(discord.ui.Button):
             return
         
         await db.update_user_balance(view.game.user_id, -split_cost, TransactionType.GAME_LOSS, description="Blackjack split")
+        await db.update_server_budget(split_cost)  # Add to server budget
         view.game.split()
         await view.update_game(interaction)
 
@@ -535,6 +602,7 @@ class SurrenderButton(discord.ui.Button):
         
         view.game.surrender()
         refund = view.bet / 2
+        await db.update_server_budget(-refund)  # Deduct refund from server budget
         await db.update_user_balance(view.game.user_id, refund, TransactionType.GAME_WIN, description="Blackjack surrender refund")
         await view.update_game(interaction)
 
@@ -560,6 +628,7 @@ class InsuranceYesButton(discord.ui.Button):
             return
         
         await db.update_user_balance(view.game.user_id, -insurance_cost, TransactionType.GAME_LOSS, description="Blackjack insurance")
+        await db.update_server_budget(insurance_cost)  # Add to server budget
         view.game.take_insurance(True)
         await view.update_game(interaction)
 
@@ -597,6 +666,7 @@ class PlayAgainButton(discord.ui.Button):
             return
         
         await db.update_user_balance(interaction.user.id, -self.last_bet, TransactionType.GAME_LOSS, description="Blackjack bet")
+        await db.update_server_budget(self.last_bet)  # Add to server budget
         
         config = load_config()
         game_config = config.get("games", {}).get("blackjack", {})
@@ -643,6 +713,7 @@ class DoubleOrNothingButton(discord.ui.Button):
             return
         
         await db.update_user_balance(interaction.user.id, -self.double_bet, TransactionType.GAME_LOSS, description="Blackjack bet (double or nothing)")
+        await db.update_server_budget(self.double_bet)  # Add to server budget
         
         config = load_config()
         game_config = config.get("games", {}).get("blackjack", {})
@@ -978,6 +1049,9 @@ class GamesCog(commands.Cog):
     async def coinflip(self, interaction: discord.Interaction, bet: float, side: Literal["heads", "tails"]):
         """Play coinflip"""
         user = await db.get_or_create_user(interaction.user.id)
+        user_before = user.balance
+        economy = await db.get_server_economy()
+        budget_before = economy.total_budget
         
         config = self.config.get("economy", {})
         min_bet = config.get("min_bet", 1)
@@ -1049,16 +1123,74 @@ class GamesCog(commands.Cog):
             color = 0x00FF00
             result_text = f"🎉 **{game.result_side.upper()}** - YOU WIN!"
             profit = f"+{format_balance(net_profit)}"  # Show actual profit after tax
+            
+            # Log game
+            economy_after = await db.get_server_economy()
+            user_after = await db.get_or_create_user(interaction.user.id)
+            await economy_logger.log_game(
+                game_name="Coinflip",
+                user_id=interaction.user.id,
+                user_name=interaction.user.display_name,
+                bet=bet,
+                result=f"WIN ({game.result_side.upper()})",
+                winnings=total_payout,
+                profit=net_profit,
+                user_before=user_before,
+                user_after=user_after.balance,
+                budget_before=budget_before,
+                budget_after=economy_after.total_budget,
+                details={
+                    "Choice": side.upper(),
+                    "Landed On": game.result_side.upper(),
+                    "Gross Profit": f"${profit_amount:,.2f}",
+                    "Tax": f"${tax:,.2f}",
+                    "Net Profit": f"${net_profit:,.2f}"
+                }
+            )
         elif result == CoinflipResult.EDGE:
             # Edge - money stays in server budget (already there)
             color = 0x9B59B6
             result_text = "😱 **EDGE** - The coin landed on its edge!"
             profit = f"-{format_balance(bet)}"
+            
+            # Log game
+            economy_after = await db.get_server_economy()
+            await economy_logger.log_game(
+                game_name="Coinflip",
+                user_id=interaction.user.id,
+                user_name=interaction.user.display_name,
+                bet=bet,
+                result="EDGE (0.5% chance!)",
+                winnings=0,
+                profit=-bet,
+                user_before=user_before,
+                user_after=user_before - bet,
+                budget_before=budget_before,
+                budget_after=economy_after.total_budget,
+                details={"Choice": side.upper(), "Landed On": "EDGE"}
+            )
         else:
             # Player loses - money stays in server budget (already there)
             color = 0xFF0000
             result_text = f"💔 **{game.result_side.upper()}** - YOU LOSE"
             profit = f"-{format_balance(bet)}"
+            
+            # Log game
+            economy_after = await db.get_server_economy()
+            await economy_logger.log_game(
+                game_name="Coinflip",
+                user_id=interaction.user.id,
+                user_name=interaction.user.display_name,
+                bet=bet,
+                result=f"LOSS ({game.result_side.upper()})",
+                winnings=0,
+                profit=-bet,
+                user_before=user_before,
+                user_after=user_before - bet,
+                budget_before=budget_before,
+                budget_after=economy_after.total_budget,
+                details={"Choice": side.upper(), "Landed On": game.result_side.upper()}
+            )
         
         embed = discord.Embed(title="🪙 COINFLIP - RESULT", description=f"```ansi\n\u001b[1;33m{result_text}\u001b[0m\n```", color=color)
         embed.add_field(name="Your Choice", value=side.upper(), inline=True)

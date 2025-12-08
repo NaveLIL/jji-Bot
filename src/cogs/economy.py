@@ -9,6 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from src.services.database import db
+from src.services.economy_logger import economy_logger, EconomyAction
 from src.models.database import TransactionType
 from src.utils.helpers import format_balance, calculate_tax, load_config
 from src.utils.security import rate_limited
@@ -141,6 +142,25 @@ class EconomyCog(commands.Cog):
         if tax_amount > 0:
             await db.add_taxes_collected(tax_amount)
         
+        # Log transfer
+        recipient = await db.get_or_create_user(user.id)
+        economy_after = await db.get_server_economy()
+        await economy_logger.log_transfer(
+            sender_id=interaction.user.id,
+            sender_name=interaction.user.display_name,
+            receiver_id=user.id,
+            receiver_name=user.display_name,
+            amount=amount,
+            tax=tax_amount,
+            sender_before=before,
+            sender_after=after,
+            receiver_before=recipient.balance - net_amount,
+            receiver_after=recipient.balance,
+            budget_before=economy.total_budget,
+            budget_after=economy_after.total_budget,
+            source="Pay Command"
+        )
+        
         # Track metrics
         metrics.track_transaction("transfer")
         if tax_amount > 0:
@@ -247,19 +267,42 @@ class EconomyCog(commands.Cog):
             
             # Apply tax
             economy = await db.get_server_economy()
+            user_before = (await db.get_or_create_user(interaction.user.id)).balance
+            budget_before = economy.total_budget
             net_reward, tax = calculate_tax(reward, economy.tax_rate)
             
-            # Add to balance
+            # Add to balance - tax already deducted in net_reward
             await db.update_user_balance(
                 interaction.user.id,
                 net_reward,
                 TransactionType.CASE_REWARD,
-                tax_amount=tax,
+                tax_amount=0,  # Tax already calculated in net_reward
                 description="Case reward"
             )
             
             if tax > 0:
                 await db.add_taxes_collected(tax)
+            
+            # Log case win
+            user_after = await db.get_or_create_user(interaction.user.id)
+            economy_after = await db.get_server_economy()
+            await economy_logger.log(
+                action=EconomyAction.CASE_WIN,
+                amount=net_reward,
+                user_id=interaction.user.id,
+                user_name=interaction.user.display_name,
+                before_balance=user_before,
+                after_balance=user_after.balance,
+                before_budget=budget_before,
+                after_budget=economy_after.total_budget,
+                description=f"Case reward: ${reward:,.2f} (gross)",
+                details={
+                    "Gross Reward": f"${reward:,.2f}",
+                    "Tax": f"${tax:,.2f}",
+                    "Net Reward": f"${net_reward:,.2f}"
+                },
+                source="Case Command"
+            )
             
             if reward >= 10:
                 result_text = f"# 🎉 JACKPOT!\n\n**You won {format_balance(reward)}!**\nAfter tax ({economy.tax_rate:.0f}%): `{format_balance(net_reward)}`"

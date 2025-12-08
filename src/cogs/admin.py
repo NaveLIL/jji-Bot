@@ -8,6 +8,7 @@ from discord.ext import commands
 from typing import Literal
 
 from src.services.database import db
+from src.services.economy_logger import economy_logger, EconomyAction
 from src.models.database import TransactionType, LogType
 from src.utils.helpers import format_balance, load_config, save_config
 from src.utils.security import admin_only
@@ -238,9 +239,25 @@ class AddBudgetModal(discord.ui.Modal, title="Add to Server Budget"):
         try:
             amount = float(self.amount.value)
             
+            economy_before = await db.get_server_economy()
+            budget_before = economy_before.total_budget
+            
             success, new_budget = await db.update_server_budget(amount, add=True)
             
             if success:
+                # Log admin budget change
+                await economy_logger.log(
+                    action=EconomyAction.ADMIN_ADD,
+                    amount=amount,
+                    user_id=interaction.user.id,
+                    user_name=interaction.user.display_name,
+                    before_budget=budget_before,
+                    after_budget=new_budget,
+                    description=f"Admin added to server budget",
+                    details={"Admin": f"<@{interaction.user.id}>"},
+                    source="Admin AddBudget"
+                )
+                
                 await interaction.response.send_message(
                     f"✅ Added **{format_balance(amount)}** to budget.\n"
                     f"New budget: **{format_balance(new_budget)}**",
@@ -262,54 +279,54 @@ class AddBudgetModal(discord.ui.Modal, title="Add to Server Budget"):
 # ==================== ECONOMY PANEL VIEW ====================
 
 class EconomyPanelView(discord.ui.View):
-    """Interactive economy control panel"""
+    """Interactive economy control panel - persistent view"""
     
-    def __init__(self, timeout: float = 600):
-        super().__init__(timeout=timeout)
+    def __init__(self):
+        super().__init__(timeout=None)  # Never timeout
     
-    @discord.ui.button(label="Set Tax Rate", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Set Tax Rate", style=discord.ButtonStyle.primary, row=0, custom_id="economy_panel:tax_rate")
     async def tax_rate(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ Admin only!", ephemeral=True)
             return
         await interaction.response.send_modal(TaxRateModal())
     
-    @discord.ui.button(label="Set Soldier Value", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Set Soldier Value", style=discord.ButtonStyle.primary, row=0, custom_id="economy_panel:soldier_value")
     async def soldier_value(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ Admin only!", ephemeral=True)
             return
         await interaction.response.send_modal(SoldierValueModal())
     
-    @discord.ui.button(label="Set Prime Time", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Set Prime Time", style=discord.ButtonStyle.primary, row=0, custom_id="economy_panel:prime_time")
     async def prime_time(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ Admin only!", ephemeral=True)
             return
         await interaction.response.send_modal(PrimeTimeModal())
     
-    @discord.ui.button(label="Set Salaries", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Set Salaries", style=discord.ButtonStyle.secondary, row=1, custom_id="economy_panel:salaries")
     async def salaries(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ Admin only!", ephemeral=True)
             return
         await interaction.response.send_modal(SalaryModal())
     
-    @discord.ui.button(label="Set Budget", style=discord.ButtonStyle.danger, row=1)
+    @discord.ui.button(label="Set Budget", style=discord.ButtonStyle.danger, row=1, custom_id="economy_panel:set_budget")
     async def set_budget(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ Admin only!", ephemeral=True)
             return
         await interaction.response.send_modal(BudgetModal())
     
-    @discord.ui.button(label="Add Budget", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="Add Budget", style=discord.ButtonStyle.success, row=1, custom_id="economy_panel:add_budget")
     async def add_budget(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ Admin only!", ephemeral=True)
             return
         await interaction.response.send_modal(AddBudgetModal())
     
-    @discord.ui.button(label="🔄 Refresh Stats", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="🔄 Refresh Stats", style=discord.ButtonStyle.secondary, row=2, custom_id="economy_panel:refresh")
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = await self.get_stats_embed()
         await interaction.response.edit_message(embed=embed, view=self)
@@ -467,8 +484,10 @@ class AdminCog(commands.Cog):
     ):
         """Add to user balance - deducts from server budget"""
         # Check server budget if adding money
+        economy = await db.get_server_economy()
+        budget_before = economy.total_budget
+        
         if amount > 0:
-            economy = await db.get_server_economy()
             if economy.total_budget < amount:
                 await interaction.response.send_message(
                     f"❌ Server budget too low! Budget: **{format_balance(economy.total_budget)}**, Need: **{format_balance(amount)}**",
@@ -489,6 +508,22 @@ class AdminCog(commands.Cog):
                 await db.update_server_budget(-amount)  # Take from server budget
                 await db.add_rewards_paid(amount)
             # If amount < 0, money goes back to server (no action needed, just stays in user's negative)
+            
+            # Log admin action
+            economy_after = await db.get_server_economy()
+            await economy_logger.log(
+                action=EconomyAction.ADMIN_ADD,
+                amount=amount,
+                user_id=user.id,
+                user_name=user.display_name,
+                before_balance=before,
+                after_balance=after,
+                before_budget=budget_before,
+                after_budget=economy_after.total_budget,
+                description=f"Admin balance adjustment by {interaction.user.display_name}",
+                details={"Admin": f"<@{interaction.user.id}>"},
+                source="Admin AddMoney"
+            )
             
             await interaction.response.send_message(
                 f"✅ Added **{format_balance(amount)}** to **{user.display_name}**\n"
@@ -522,6 +557,8 @@ class AdminCog(commands.Cog):
             return
         
         db_user = await db.get_or_create_user(user.id)
+        economy = await db.get_server_economy()
+        budget_before = economy.total_budget
         
         if db_user.balance < amount:
             await interaction.response.send_message(
@@ -540,6 +577,22 @@ class AdminCog(commands.Cog):
         if success:
             # Add to server budget
             await db.update_server_budget(amount, add=True)
+            
+            # Log admin action
+            economy_after = await db.get_server_economy()
+            await economy_logger.log(
+                action=EconomyAction.ADMIN_REMOVE,
+                amount=amount,
+                user_id=user.id,
+                user_name=user.display_name,
+                before_balance=before,
+                after_balance=after,
+                before_budget=budget_before,
+                after_budget=economy_after.total_budget,
+                description=f"Fine issued by {interaction.user.display_name}",
+                details={"Admin": f"<@{interaction.user.id}>", "Reason": "Fine"},
+                source="Admin Fine"
+            )
             
             await interaction.response.send_message(
                 f"✅ Fined **{user.display_name}** for **{format_balance(amount)}**\n"
@@ -563,6 +616,8 @@ class AdminCog(commands.Cog):
     ):
         """Confiscate entire balance"""
         db_user = await db.get_or_create_user(user.id)
+        economy = await db.get_server_economy()
+        budget_before = economy.total_budget
         amount = db_user.balance
         
         if amount <= 0:
@@ -581,6 +636,22 @@ class AdminCog(commands.Cog):
         
         if success:
             await db.update_server_budget(amount, add=True)
+            
+            # Log admin action
+            economy_after = await db.get_server_economy()
+            await economy_logger.log(
+                action=EconomyAction.ADMIN_REMOVE,
+                amount=amount,
+                user_id=user.id,
+                user_name=user.display_name,
+                before_balance=before,
+                after_balance=after,
+                before_budget=budget_before,
+                after_budget=economy_after.total_budget,
+                description=f"Full confiscation by {interaction.user.display_name}",
+                details={"Admin": f"<@{interaction.user.id}>", "Reason": "Confiscation"},
+                source="Admin Confiscate"
+            )
             
             await interaction.response.send_message(
                 f"✅ Confiscated **{format_balance(amount)}** from **{user.display_name}**\n"
@@ -836,4 +907,6 @@ class AdminCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
+    # Register persistent view so buttons work after bot restart
+    bot.add_view(EconomyPanelView())
     await bot.add_cog(AdminCog(bot))

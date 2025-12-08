@@ -55,7 +55,7 @@ def format_time(seconds: int) -> str:
 
 
 def format_pb_time(seconds: int) -> str:
-    """Format SB (Squad Battles) time with full labels"""
+    """Format SB (Squadron Battles) time with full labels"""
     if seconds == 0:
         return "0 hours"
     

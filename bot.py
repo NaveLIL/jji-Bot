@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from src.services.database import db
 from src.services.cache import cache
+from src.services.economy_logger import EconomyLogger, EconomyAction, economy_logger
 from src.models.database import TransactionType
 from src.utils.helpers import load_config, save_config, is_prime_time, format_balance
 from src.utils.logger import setup_logging, DiscordLogger
@@ -54,7 +55,7 @@ class JJIBot(commands.Bot):
         self.config = load_config()
         self.logger = setup_logging(LOG_LEVEL, "logs/bot.log", LOG_WEBHOOK)
         self.discord_logger = None
-        self.start_time = datetime.utcnow()
+        self.start_time = datetime.now(timezone.utc)
         
         # SB channel monitoring: {channel_id: {"last_ping": datetime, "commander_id": int}}
         self.sb_channels: dict[int, dict] = {}
@@ -97,6 +98,10 @@ class JJIBot(commands.Bot):
                 self.logger.info(f"Loaded cog: {cog}")
             except Exception as e:
                 self.logger.error(f"Failed to load {cog}: {e}")
+        
+        # Initialize Economy Logger
+        EconomyLogger.setup(self)
+        self.logger.info("Economy Logger initialized")
         
         # Sync commands
         try:
@@ -154,10 +159,10 @@ class JJIBot(commands.Bot):
         master_channel_id = config.get("channels", {}).get("master_voice")
         
         # Check if user left a temp SB channel - delete if empty
-        if before.channel and before.channel.name.startswith("Squad Battle #"):
+        if before.channel and before.channel.name.startswith("Squadron Battle #"):
             if len(before.channel.members) == 0:
                 try:
-                    await before.channel.delete(reason="Squad Battle ended - channel empty")
+                    await before.channel.delete(reason="Squadron Battle ended - channel empty")
                     self.logger.info(f"Deleted empty SB channel: {before.channel.name}")
                 except Exception as e:
                     self.logger.error(f"Failed to delete SB channel: {e}")
@@ -181,10 +186,10 @@ class JJIBot(commands.Bot):
         # User switched channels
         elif before.channel and after.channel and before.channel.id != after.channel.id:
             # Check if old channel was temp SB and now empty
-            if before.channel.name.startswith("Squad Battle #"):
+            if before.channel.name.startswith("Squadron Battle #"):
                 if len(before.channel.members) == 0:
                     try:
-                        await before.channel.delete(reason="Squad Battle ended - channel empty")
+                        await before.channel.delete(reason="Squadron Battle ended - channel empty")
                         self.logger.info(f"Deleted empty SB channel: {before.channel.name}")
                     except Exception as e:
                         self.logger.error(f"Failed to delete SB channel: {e}")
@@ -228,11 +233,11 @@ class JJIBot(commands.Bot):
         
         # Find next available SB number
         guild = member.guild
-        existing_sb = [ch for ch in guild.voice_channels if ch.name.startswith("Squad Battle #")]
+        existing_sb = [ch for ch in guild.voice_channels if ch.name.startswith("Squadron Battle #")]
         sb_numbers = []
         for ch in existing_sb:
             try:
-                num = int(ch.name.replace("Squad Battle #", ""))
+                num = int(ch.name.replace("Squadron Battle #", ""))
                 sb_numbers.append(num)
             except ValueError:
                 pass
@@ -245,8 +250,8 @@ class JJIBot(commands.Bot):
         try:
             # Clone the master channel with same permissions
             new_channel = await master_channel.clone(
-                name=f"Squad Battle #{next_num}",
-                reason=f"Squad Battle created by {member.display_name}"
+                name=f"Squadron Battle #{next_num}",
+                reason=f"Squadron Battle created by {member.display_name}"
             )
             
             # Move to same category as master
@@ -254,7 +259,7 @@ class JJIBot(commands.Bot):
                 await new_channel.edit(category=master_channel.category, position=master_channel.position + next_num)
             
             # Move the sergeant to the new channel
-            await member.move_to(new_channel, reason="Moved to new Squad Battle channel")
+            await member.move_to(new_channel, reason="Moved to new Squadron Battle channel")
             
             self.logger.info(f"Created SB channel #{next_num} by {member}")
             
@@ -270,8 +275,8 @@ class JJIBot(commands.Bot):
                         needed = max_squad - current_count
                         
                         embed = discord.Embed(
-                            title="📢 SQUAD ASSEMBLY!",
-                            description=f"**Squad #{next_num}** is looking for soldiers!",
+                            title="📢 SQUADRON ASSEMBLY!",
+                            description=f"**Squadron #{next_num}** is looking for soldiers!",
                             color=0xFF6600
                         )
                         embed.add_field(
@@ -285,16 +290,16 @@ class JJIBot(commands.Bot):
                             inline=True
                         )
                         embed.add_field(
-                            name="👥 Current Squad",
+                            name="👥 Current Squadron",
                             value=f"`{current_count}/{max_squad}` — need {needed} more!",
                             inline=False
                         )
                         embed.add_field(
                             name="💰 Rewards",
-                            value="Earn salary while playing in Squad Battles!",
+                            value="Earn salary while playing in Squadron Battles!",
                             inline=False
                         )
-                        embed.set_footer(text="Join the voice channel to participate! • JJI Squad System")
+                        embed.set_footer(text="Join the voice channel to participate! • JJI Squadron System")
                         
                         # Ping soldier role if configured
                         soldier_role_id = config.get("roles", {}).get("soldier")
@@ -304,7 +309,7 @@ class JJIBot(commands.Bot):
                         
                         # Register channel in tracker to avoid duplicate ping
                         self.sb_channels[new_channel.id] = {
-                            "last_ping": datetime.utcnow(),
+                            "last_ping": datetime.now(timezone.utc),
                             "commander_id": member.id,
                             "last_status": "initial"
                         }
@@ -325,7 +330,7 @@ class JJIBot(commands.Bot):
                         member.id,
                         bonus,
                         TransactionType.MASTER_BONUS,
-                        description="Daily Squad Battle host bonus"
+                        description="Daily Squadron Battle host bonus"
                     )
                     await db.add_rewards_paid(bonus)
                     
@@ -335,8 +340,8 @@ class JJIBot(commands.Bot):
                     # DM the sergeant about their bonus
                     try:
                         dm_embed = discord.Embed(
-                            title="🎖️ Squad Battle Host Bonus!",
-                            description=f"You received **{format_balance(bonus)}** for hosting Squad Battles today!",
+                            title="🎖️ Squadron Battle Host Bonus!",
+                            description=f"You received **{format_balance(bonus)}** for hosting Squadron Battles today!",
                             color=0x00FF00
                         )
                         await member.send(embed=dm_embed)
@@ -560,7 +565,10 @@ class JJIBot(commands.Bot):
         
         economy = await db.get_server_economy()
         remaining_budget = economy.total_budget
+        budget_before = economy.total_budget
         total_paid = 0
+        total_tax = 0
+        paid_users = []
         
         for session in sessions:
             user = session.user
@@ -568,10 +576,13 @@ class JJIBot(commands.Bot):
             # Determine rate based on role
             if user.is_officer:
                 rate = officer_rate
+                role_name = "Officer"
             elif user.is_sergeant:
                 rate = sergeant_rate
+                role_name = "Sergeant"
             elif user.is_soldier:
                 rate = soldier_rate
+                role_name = "Soldier"
             else:
                 continue  # No salary for non-role members
             
@@ -580,22 +591,51 @@ class JJIBot(commands.Bot):
                 self.logger.warning("Server budget depleted! Cannot pay more salaries.")
                 break
             
-            # Pay salary from server budget
+            # Apply salary tax
+            tax_amount = rate * (economy.tax_rate / 100)
+            net_salary = rate - tax_amount
+            
+            user_before = user.balance
+            
+            # Pay salary from server budget (net amount after tax)
             await db.update_user_balance(
                 user.discord_id,
-                rate,
+                net_salary,
                 TransactionType.SALARY,
+                tax_amount=0,  # Tax already deducted
                 description="SB time salary"
             )
             
-            remaining_budget -= rate
-            total_paid += rate
+            remaining_budget -= net_salary  # Only deduct net from budget
+            total_paid += net_salary
+            total_tax += tax_amount
+            paid_users.append(f"{user.discord_id} ({role_name}): +${net_salary:.2f}")
+            
+            # Tax stays in server budget (not deducted)
+            if tax_amount > 0:
+                await db.add_taxes_collected(tax_amount)
         
         # Deduct total from server budget in one operation
         if total_paid > 0:
             await db.update_server_budget(-total_paid)
             await db.add_rewards_paid(total_paid)
             self.logger.debug(f"Distributed salaries: {format_balance(total_paid)}")
+            
+            # Log salary distribution (aggregate)
+            economy_after = await db.get_server_economy()
+            await economy_logger.log(
+                action=EconomyAction.BUDGET_SALARY_PAID,
+                amount=total_paid,
+                before_budget=budget_before,
+                after_budget=economy_after.total_budget,
+                description=f"Salary paid to {len(paid_users)} users",
+                details={
+                    "Total Net Paid": f"${total_paid:,.2f}",
+                    "Total Tax Kept": f"${total_tax:,.2f}",
+                    "Users Paid": len(paid_users)
+                },
+                source="SalaryTask"
+            )
     
     @salary_task.before_loop
     async def before_salary(self):
@@ -663,7 +703,7 @@ class JJIBot(commands.Bot):
         """Update Prometheus metrics"""
         try:
             # Update bot metrics
-            uptime = (datetime.utcnow() - self.start_time).total_seconds()
+            uptime = (datetime.now(timezone.utc) - self.start_time).total_seconds()
             metrics.update_uptime(uptime)
             metrics.update_latency(self.latency * 1000)
             metrics.update_guilds(len(self.guilds))
@@ -689,7 +729,7 @@ class JJIBot(commands.Bot):
     
     @tasks.loop(minutes=1)
     async def sb_monitor_task(self):
-        """Monitor Squad Battle channels and send recruitment pings"""
+        """Monitor Squadron Battle channels and send recruitment pings"""
         try:
             config = self.config
             guild_id = config.get("guild_id")
@@ -710,10 +750,10 @@ class JJIBot(commands.Bot):
             
             soldier_role_id = config.get("roles", {}).get("soldier")
             max_squad = 8
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             
             # Find all active SB channels
-            sb_channels = [ch for ch in guild.voice_channels if ch.name.startswith("Squad Battle #")]
+            sb_channels = [ch for ch in guild.voice_channels if ch.name.startswith("Squadron Battle #")]
             
             for channel in sb_channels:
                 member_count = len(channel.members)
@@ -741,14 +781,14 @@ class JJIBot(commands.Bot):
                 
                 # Determine ping interval based on squad status
                 if member_count < max_squad:
-                    # Need more soldiers - ping every 5 minutes
-                    ping_interval = 5
+                    # Need more soldiers - ping every 30 minutes
+                    ping_interval = 30
                     needed = max_squad - member_count
                     
                     if time_since_ping >= ping_interval:
                         embed = discord.Embed(
                             title="📢 SOLDIERS NEEDED!",
-                            description=f"**Squad #{channel.name.split('#')[1]}** needs reinforcements!",
+                            description=f"**Squadron #{channel.name.split('#')[1]}** needs reinforcements!",
                             color=0xFF4444
                         )
                         embed.add_field(
@@ -757,7 +797,7 @@ class JJIBot(commands.Bot):
                             inline=True
                         )
                         embed.add_field(
-                            name="👥 Current Squad",
+                            name="👥 Current Squadron",
                             value=f"`{member_count}/{max_squad}`",
                             inline=True
                         )
@@ -771,7 +811,7 @@ class JJIBot(commands.Bot):
                             value="Join now and earn salary!",
                             inline=False
                         )
-                        embed.set_footer(text="Join the battle! • Squad System")
+                        embed.set_footer(text="Join the battle! • Squadron System")
                         
                         ping_content = f"<@&{soldier_role_id}>" if soldier_role_id else ""
                         await ping_channel.send(content=ping_content, embed=embed)
@@ -781,13 +821,13 @@ class JJIBot(commands.Bot):
                         self.logger.debug(f"SB ping: {channel.name} needs {needed} more")
                 
                 else:
-                    # Full squad - ping every 30 minutes for standby
-                    ping_interval = 30
+                    # Full squad - ping every 60 minutes (1 hour) for standby
+                    ping_interval = 60
                     
                     if time_since_ping >= ping_interval:
                         embed = discord.Embed(
-                            title="✅ SQUAD FULL - STANDBY!",
-                            description=f"**Squad #{channel.name.split('#')[1]}** is fully staffed!",
+                            title="✅ SQUADRON FULL - STANDBY!",
+                            description=f"**Squadron #{channel.name.split('#')[1]}** is fully staffed!",
                             color=0x00FF00
                         )
                         embed.add_field(
@@ -796,7 +836,7 @@ class JJIBot(commands.Bot):
                             inline=True
                         )
                         embed.add_field(
-                            name="👥 Squad Size",
+                            name="👥 Squadron Size",
                             value=f"`{member_count}/{max_squad}`",
                             inline=True
                         )
@@ -805,7 +845,7 @@ class JJIBot(commands.Bot):
                             value="Be prepared to join as replacement if someone leaves!",
                             inline=False
                         )
-                        embed.set_footer(text="Stay alert for openings! • Squad System")
+                        embed.set_footer(text="Stay alert for openings! • Squadron System")
                         
                         # No ping for standby, just info message
                         await ping_channel.send(embed=embed)
