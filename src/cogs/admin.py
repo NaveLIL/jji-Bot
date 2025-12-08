@@ -505,9 +505,9 @@ class AdminCog(commands.Cog):
         if success:
             # Deduct from server budget if adding, add to budget if removing
             if amount > 0:
-                await db.update_server_budget(-amount)  # Take from server budget
-                await db.add_rewards_paid(amount)
-            # If amount < 0, money goes back to server (no action needed, just stays in user's negative)
+                await db.add_rewards_paid(amount)  # This deducts from budget and tracks stats
+            elif amount < 0:
+                await db.update_server_budget(-amount, add=True)  # Return money to budget
             
             # Log admin action
             economy_after = await db.get_server_economy()

@@ -323,16 +323,13 @@ class JJIBot(commands.Bot):
                 economy = await db.get_server_economy()
                 
                 if economy.total_budget >= bonus:
-                    # Deduct from server budget first
-                    await db.update_server_budget(-bonus)
-                    
                     await db.update_user_balance(
                         member.id,
                         bonus,
                         TransactionType.MASTER_BONUS,
                         description="Daily Squadron Battle host bonus"
                     )
-                    await db.add_rewards_paid(bonus)
+                    await db.add_rewards_paid(bonus)  # This deducts from budget and tracks stats
                     
                     self.logger.info(f"Sergeant {member} claimed SB host bonus: ${bonus}")
                     metrics.track_transaction("master_bonus")
@@ -617,8 +614,7 @@ class JJIBot(commands.Bot):
         
         # Deduct total from server budget in one operation
         if total_paid > 0:
-            await db.update_server_budget(-total_paid)
-            await db.add_rewards_paid(total_paid)
+            await db.add_rewards_paid(total_paid)  # This deducts from budget and tracks stats
             self.logger.debug(f"Distributed salaries: {format_balance(total_paid)}")
             
             # Log salary distribution (aggregate)
@@ -666,8 +662,6 @@ class JJIBot(commands.Bot):
                     continue
                 
                 # Deduct from server budget first
-                await db.update_server_budget(-bonus_amount)
-                
                 # Pay bonus
                 await db.update_user_balance(
                     officer.discord_id,
@@ -676,7 +670,7 @@ class JJIBot(commands.Bot):
                     description=f"10h SB bonus for recruit"
                 )
                 
-                await db.add_rewards_paid(bonus_amount)
+                await db.add_rewards_paid(bonus_amount)  # This deducts from budget and tracks stats
                 await db.mark_10h_bonus_rewarded(log.id)
                 
                 self.logger.info(f"Paid 10h bonus to officer {officer.discord_id}: ${bonus_amount}")
