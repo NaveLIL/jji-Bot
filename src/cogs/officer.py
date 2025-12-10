@@ -107,6 +107,10 @@ class OfficerCog(commands.Cog):
         # Deduct from server budget (only net amount - tax stays)
         await db.add_rewards_paid(net_reward)
         
+        # Add tax to server budget
+        if tax > 0:
+            await db.add_taxes_collected(tax)
+        
         # Log recruitment reward
         officer_after = await db.get_or_create_user(interaction.user.id)
         economy_after = await db.get_server_economy()

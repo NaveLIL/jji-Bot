@@ -187,6 +187,7 @@ class PvPBlackjackGame:
         
         self.winner: Optional[int] = None
         self.is_complete = False
+        self.paid_out = False
     
     def get_player_hand(self, user_id: int) -> Optional[PvPPlayerHand]:
         if user_id == self.player1_id:
@@ -763,8 +764,46 @@ class PvPBlackjackView(discord.ui.View):
     def hand(self) -> PvPPlayerHand:
         return self.pvp_game.get_player_hand(self.player_id)
     
+    async def handle_completion(self):
+        """Handle payout when game completes"""
+        if self.pvp_game.paid_out:
+            return
+        
+        self.pvp_game.paid_out = True
+        
+        if self.pvp_game.winner:
+            # Winner takes the pot
+            await db.update_user_balance(
+                self.pvp_game.winner,
+                self.pvp_game.pot,
+                TransactionType.GAME_WIN,
+                description="PvP Blackjack win"
+            )
+            
+            # Log the PvP result
+            economy_after = await db.get_server_economy()
+            user_after = await db.get_or_create_user(self.pvp_game.winner)
+            await economy_logger.log_game(
+                action="pvp_win",
+                user_id=self.pvp_game.winner,
+                user_name="PvP Winner",  # We don't have name here
+                bet=self.pvp_game.bet,
+                winnings=self.pvp_game.pot,
+                profit=self.pvp_game.pot - self.pvp_game.bet,
+                user_before=user_after.balance - self.pvp_game.pot,  # Approximate
+                user_after=user_after.balance,
+                budget_before=economy_after.total_budget,  # Budget unchanged
+                budget_after=economy_after.total_budget,
+                details={"Pot": f"${self.pvp_game.pot:,.2f}"}
+            )
+        # For ties, bets are already deducted, no refund needed (money stays deducted)
+    
     def update_buttons(self):
         self.clear_items()
+        
+        # Handle completion payout if just completed
+        if self.pvp_game.is_complete and not self.pvp_game.paid_out:
+            self.handle_completion()
         
         my_hand = self.hand
         if my_hand.is_done:

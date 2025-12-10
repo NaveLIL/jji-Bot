@@ -342,14 +342,14 @@ class DatabaseService:
                 )
                 soldier_count = soldier_count_result.scalar() or 0
                 
-                # Calculate budget difference
-                old_soldier_contribution = old_value * soldier_count
-                new_soldier_contribution = value * soldier_count
-                budget_diff = new_soldier_contribution - old_soldier_contribution
+                # Calculate budget difference (no longer adjust budget - closed-loop economy)
+                # old_soldier_contribution = old_value * soldier_count
+                # new_soldier_contribution = value * soldier_count
+                # budget_diff = new_soldier_contribution - old_soldier_contribution
                 
                 # Update economy
                 economy.soldier_value = value
-                economy.total_budget += budget_diff
+                # economy.total_budget += budget_diff
                 
                 await session.commit()
                 return old_value, value, soldier_count

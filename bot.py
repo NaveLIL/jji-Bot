@@ -386,9 +386,8 @@ class JJIBot(commands.Bot):
                 soldier_value = economy.soldier_value
                 
                 if not was_soldier and is_soldier:
-                    # Got soldier role - ADD to server budget
-                    await db.update_server_budget(soldier_value, add=True)
-                    self.logger.info(f"New soldier: {after}, budget +{format_balance(soldier_value)}")
+                    # Got soldier role - no budget change (closed-loop economy)
+                    self.logger.info(f"New soldier: {after}")
                     
                     # Log to recruit channel
                     log_channel_id = config.get("channels", {}).get("log_recruit")
@@ -413,9 +412,8 @@ class JJIBot(commands.Bot):
                             self.logger.error(f"Failed to log new soldier: {e}")
                 
                 elif was_soldier and not is_soldier:
-                    # Lost soldier role - DEDUCT from server budget
-                    await db.update_server_budget(-soldier_value)
-                    self.logger.info(f"Lost soldier: {after}, budget -{format_balance(soldier_value)}")
+                    # Lost soldier role - no budget change (closed-loop economy)
+                    self.logger.info(f"Lost soldier: {after}")
                     
                     # Log to recruit channel
                     log_channel_id = config.get("channels", {}).get("log_recruit")
