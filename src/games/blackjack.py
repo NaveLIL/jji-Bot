@@ -278,29 +278,32 @@ class BlackjackGame:
         if not self.can_take_insurance:
             return
         
+        insurance_cost = self.bet / 2
         if accept:
             # Insurance costs half the bet
-            self.player_hands[0].insurance_bet = self.bet / 2
+            self.player_hands[0].insurance_bet = insurance_cost
         
         # Check for dealer blackjack
         if self.dealer_hand.is_blackjack:
             self.state = GameState.COMPLETE
             
-            # Insurance pays 2:1 if dealer has blackjack
-            insurance_payout = self.player_hands[0].insurance_bet * self.insurance_payout if accept else 0
+            # Insurance pays 2:1 if dealer has blackjack (you get back 2x your insurance bet)
+            insurance_winnings = insurance_cost * self.insurance_payout if accept else 0
             
             if self.player_hands[0].is_blackjack:
-                # Push on main bet, win insurance
-                self.results = [(HandResult.PUSH, insurance_payout)]
+                # Push on main bet (get bet back), plus insurance winnings
+                # Net result = insurance winnings only (main bet is returned separately)
+                self.results = [(HandResult.PUSH, insurance_winnings)]
             else:
-                # Lose main bet, but insurance pays
-                net = insurance_payout - self.bet - (self.bet / 2 if accept else 0)
+                # Lose main bet (-bet), insurance pays (+insurance_winnings)
+                # Insurance cost is already deducted, so net = winnings - main_bet
+                # If insurance taken: net = insurance_winnings - bet (insurance cost already paid)
+                # If not taken: net = -bet
+                net = insurance_winnings - self.bet
                 self.results = [(HandResult.LOSE, net)]
         else:
-            # No dealer blackjack, insurance loses if taken
-            if accept:
-                # Insurance lost
-                pass
+            # No dealer blackjack, insurance loses if taken (cost already deducted)
+            # Just continue with normal play
             self._check_initial_blackjacks()
     
     def hit(self) -> Tuple[bool, Card]:

@@ -12,7 +12,7 @@ from sqlalchemy import select, update, delete, func, and_, or_
 from sqlalchemy.orm import selectinload
 
 from src.models.database import (
-    Base, User, Role, UserRole, Transaction, ServerEconomy,
+    Base, User, Role, UserRole, Transaction, ServerEconomy, SalaryChange,
     CaseUse, OfficerLog, ChannelConfig, GameSession, VoiceSession,
     RateLimitEntry, SecurityLog, BotStats, TransactionType, RoleType, GameType, LogType
 )

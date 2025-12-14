@@ -547,18 +547,29 @@ class JJIBot(commands.Bot):
         self.config = load_config()
         config = self.config
         prime_time = config.get("prime_time", {})
+        mute_config = config.get("mute_penalty", {})
+        mute_penalty_enabled = mute_config.get("enabled", True)
         
-        # Check prime time
-        if not is_prime_time(
+        # Check prime time - if not prime time, no salaries
+        is_prime = is_prime_time(
             prime_time.get("start_hour", 14),
             prime_time.get("end_hour", 22)
-        ):
+        )
+        if not is_prime:
             return
         
+        # Prime time 2x multiplier
+        prime_multiplier = 2.0
+        
         salaries = config.get("salaries", {})
-        soldier_rate = salaries.get("soldier_per_10min", 10) / 10  # Per minute
-        sergeant_rate = salaries.get("sergeant_per_10min", 20) / 10
-        officer_rate = salaries.get("officer_per_10min", 20) / 10
+        # Apply prime time multiplier to all rates
+        soldier_rate = (salaries.get("soldier_per_10min", 10) / 10) * prime_multiplier  # Per minute with 2x
+        sergeant_rate = (salaries.get("sergeant_per_10min", 20) / 10) * prime_multiplier
+        officer_rate = (salaries.get("officer_per_10min", 20) / 10) * prime_multiplier
+        
+        # Get guild for mute checking
+        guild_id = config.get("guild_id")
+        guild = self.get_guild(guild_id) if guild_id else None
         
         # Use single transaction for atomic salary distribution
         async with db.session() as session:
@@ -575,8 +586,9 @@ class JJIBot(commands.Bot):
             total_paid = 0
             total_tax = 0
             paid_users = []
+            skipped_muted = 0
             
-            # Get active voice sessions with users
+            # Get active voice sessions with users (with FOR UPDATE to prevent race conditions)
             sessions_result = await session.execute(
                 select(VoiceSession)
                 .where(VoiceSession.is_active == True)
@@ -586,6 +598,22 @@ class JJIBot(commands.Bot):
             
             for voice_session in sessions:
                 user = voice_session.user
+                
+                # Check if user is muted (Discord timeout or server mute)
+                if mute_penalty_enabled and guild:
+                    try:
+                        member = guild.get_member(user.discord_id)
+                        if member:
+                            # Check for timeout (timed_out_until) or voice mute
+                            is_timed_out = member.timed_out_until is not None
+                            voice_state = member.voice
+                            is_voice_muted = voice_state and (voice_state.mute or voice_state.self_mute)
+                            
+                            if is_timed_out:
+                                skipped_muted += 1
+                                continue  # Skip muted users - no salary
+                    except Exception:
+                        pass  # If can't check, give benefit of doubt
 
                 # Determine rate based on role
                 if user.is_officer:
@@ -611,37 +639,43 @@ class JJIBot(commands.Bot):
 
                 user_before = user.balance
 
-                # Update user balance
-                user.balance += net_salary
+                # Lock user row and update balance atomically
+                user_result = await session.execute(
+                    select(User).where(User.id == user.id).with_for_update()
+                )
+                locked_user = user_result.scalar_one_or_none()
+                if not locked_user:
+                    continue
+                
+                locked_user.balance += net_salary
 
                 # Log transaction
                 transaction = Transaction(
-                    user_id=user.id,
+                    user_id=locked_user.id,
                     amount=net_salary,
                     transaction_type=TransactionType.SALARY,
                     tax_amount=tax_amount,
                     before_balance=user_before,
-                    after_balance=user.balance,
-                    description="SB time salary"
+                    after_balance=locked_user.balance,
+                    description=f"SB time salary (Prime Time 2x)"
                 )
                 session.add(transaction)
 
                 remaining_budget -= net_salary  # Only deduct net from budget
                 total_paid += net_salary
                 total_tax += tax_amount
-                paid_users.append(f"{user.discord_id} ({role_name}): +${net_salary:.2f}")
+                paid_users.append(f"{locked_user.discord_id} ({role_name}): +${net_salary:.2f}")
 
                 # Tax stays in server budget (not deducted), but we track it
                 if tax_amount > 0:
                     economy.total_taxes_collected += tax_amount
-                    # Tax is already in budget (we didn't deduct it), so no need to add back
             
             # Update server economy stats
             if total_paid > 0:
                 economy.total_rewards_paid += total_paid
                 economy.total_budget -= total_paid
 
-                self.logger.debug(f"Distributed salaries: {format_balance(total_paid)}")
+                self.logger.debug(f"Distributed salaries: {format_balance(total_paid)} (Prime Time 2x)")
 
                 # Log salary distribution (aggregate)
                 await economy_logger.log(
@@ -649,11 +683,13 @@ class JJIBot(commands.Bot):
                     amount=total_paid,
                     before_budget=budget_before,
                     after_budget=economy.total_budget,
-                    description=f"Salary paid to {len(paid_users)} users",
+                    description=f"Salary paid to {len(paid_users)} users (Prime Time 2x)",
                     details={
                         "Total Net Paid": f"${total_paid:,.2f}",
                         "Total Tax Kept": f"${total_tax:,.2f}",
-                        "Users Paid": len(paid_users)
+                        "Users Paid": len(paid_users),
+                        "Muted Skipped": skipped_muted,
+                        "Prime Time Multiplier": "2x"
                     },
                     source="SalaryTask"
                 )

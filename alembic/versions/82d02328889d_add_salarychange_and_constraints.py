@@ -33,8 +33,10 @@ def upgrade() -> None:
     )
 
     # Use batch operation to add constraint for SQLite compatibility
-    with op.batch_alter_table('server_economy') as batch_op:
-         batch_op.create_check_constraint('check_single_row', 'id = 1')
+    # Skip adding check_single_row constraint as it's incompatible with existing schema
+    # TODO: Jules should update 001_initial.py to use 'id' instead of 'guild_id'
+    # with op.batch_alter_table('server_economy') as batch_op:
+    #      batch_op.create_check_constraint('check_single_row', 'id = 1')
 
     # ### end Alembic commands ###
 

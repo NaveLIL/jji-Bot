@@ -390,6 +390,7 @@ class EnhancedBlackjackView(discord.ui.View):
     
     async def finish_game(self):
         net_result = self.game.get_net_result()
+        total_bet = self.game.total_bet  # Use total_bet for split/double calculations
         
         # Get state before any changes
         user = await db.get_or_create_user(self.game.user_id)
@@ -400,13 +401,14 @@ class EnhancedBlackjackView(discord.ui.View):
         if net_result != 0:
             if net_result > 0:
                 # Player wins - calculate tax only on PROFIT, not on bet return
-                profit_amount = net_result  # This is just the profit
+                profit_amount = net_result  # This is just the profit (already accounts for split/double)
                 
                 economy = await db.get_server_economy()
                 net_profit, tax = calculate_tax(profit_amount, economy.tax_rate)
                 
-                # Total payout = bet back + net profit after tax
-                total_payout = self.bet + net_profit
+                # Total payout = total bet back + net profit after tax
+                # For split/double, total_bet includes all additional bets
+                total_payout = total_bet + net_profit
                 
                 # Deduct total payout from server budget
                 await db.update_server_budget(-total_payout)
@@ -423,7 +425,7 @@ class EnhancedBlackjackView(discord.ui.View):
                     await db.add_taxes_collected(tax)
                     metrics.track_tax(tax)
                 
-                metrics.track_game("blackjack", "win", self.bet)
+                metrics.track_game("blackjack", "win", total_bet)
                 
                 # Log game result
                 economy_after = await db.get_server_economy()
@@ -432,7 +434,7 @@ class EnhancedBlackjackView(discord.ui.View):
                     game_name="Blackjack",
                     user_id=self.game.user_id,
                     user_name=str(self.game.user_id),
-                    bet=self.bet,
+                    bet=total_bet,
                     result="WIN",
                     winnings=total_payout,
                     profit=net_profit,
@@ -441,6 +443,8 @@ class EnhancedBlackjackView(discord.ui.View):
                     budget_before=budget_before,
                     budget_after=economy_after.total_budget,
                     details={
+                        "Initial Bet": f"${self.bet:,.2f}",
+                        "Total Bet": f"${total_bet:,.2f}",
                         "Gross Profit": f"${profit_amount:,.2f}",
                         "Tax": f"${tax:,.2f}",
                         "Net Profit": f"${net_profit:,.2f}",
@@ -449,7 +453,8 @@ class EnhancedBlackjackView(discord.ui.View):
                 )
             else:
                 # Player loses - money stays in server budget (already added when bet placed)
-                metrics.track_game("blackjack", "lose", self.bet)
+                loss_amount = abs(net_result)  # Actual loss (accounts for split/double)
+                metrics.track_game("blackjack", "lose", total_bet)
                 
                 # Log game result
                 economy_after = await db.get_server_economy()
@@ -457,26 +462,30 @@ class EnhancedBlackjackView(discord.ui.View):
                     game_name="Blackjack",
                     user_id=self.game.user_id,
                     user_name=str(self.game.user_id),
-                    bet=self.bet,
+                    bet=total_bet,
                     result="LOSS",
                     winnings=0,
-                    profit=-self.bet,
+                    profit=-loss_amount,
                     user_before=user_before,
-                    user_after=user_before,  # Balance unchanged (bet already deducted)
+                    user_after=user_before,  # Balance unchanged (bets already deducted)
                     budget_before=budget_before,
                     budget_after=economy_after.total_budget,
-                    details={"Bet Lost": f"${self.bet:,.2f}"}
+                    details={
+                        "Initial Bet": f"${self.bet:,.2f}",
+                        "Total Bet": f"${total_bet:,.2f}",
+                        "Total Lost": f"${loss_amount:,.2f}"
+                    }
                 )
         else:
-            # Push - refund bet from server budget (no tax on refund)
-            await db.update_server_budget(-self.bet)
+            # Push - refund total bet from server budget (no tax on refund)
+            await db.update_server_budget(-total_bet)
             await db.update_user_balance(
                 self.game.user_id,
-                self.bet,
+                total_bet,
                 TransactionType.GAME_WIN,
                 description="Blackjack push - refund"
             )
-            metrics.track_game("blackjack", "push", self.bet)
+            metrics.track_game("blackjack", "push", total_bet)
             
             # Log game result
             economy_after = await db.get_server_economy()
@@ -485,15 +494,19 @@ class EnhancedBlackjackView(discord.ui.View):
                 game_name="Blackjack",
                 user_id=self.game.user_id,
                 user_name=str(self.game.user_id),
-                bet=self.bet,
+                bet=total_bet,
                 result="PUSH",
-                winnings=self.bet,
+                winnings=total_bet,
                 profit=0,
                 user_before=user_before,
                 user_after=user_after.balance,
                 budget_before=budget_before,
                 budget_after=economy_after.total_budget,
-                details={"Refunded": f"${self.bet:,.2f}"}
+                details={
+                    "Initial Bet": f"${self.bet:,.2f}",
+                    "Total Bet": f"${total_bet:,.2f}",
+                    "Refunded": f"${total_bet:,.2f}"
+                }
             )
         
         await cache.delete_game_state(self.game.user_id, "blackjack")
@@ -770,33 +783,71 @@ class PvPBlackjackView(discord.ui.View):
             return
         
         self.pvp_game.paid_out = True
+        economy = await db.get_server_economy()
+        budget_before = economy.total_budget
         
         if self.pvp_game.winner:
-            # Winner takes the pot
+            # Winner takes the pot - route through server budget with tax
+            profit = self.pvp_game.pot - self.pvp_game.bet  # Winner's profit
+            
+            # Apply tax only on profit (not on bet return)
+            net_profit, tax = calculate_tax(profit, economy.tax_rate)
+            total_payout = self.pvp_game.bet + net_profit  # Bet back + taxed profit
+            
+            # PvP pot goes to server budget first (closed-loop)
+            await db.update_server_budget(self.pvp_game.pot, add=True)
+            
+            # Then pay winner from server budget
+            await db.update_server_budget(total_payout, add=False)
+            
             await db.update_user_balance(
                 self.pvp_game.winner,
-                self.pvp_game.pot,
+                total_payout,
                 TransactionType.GAME_WIN,
                 description="PvP Blackjack win"
             )
+            
+            # Track taxes
+            if tax > 0:
+                await db.add_taxes_collected(tax)
+                metrics.track_tax(tax)
             
             # Log the PvP result
             economy_after = await db.get_server_economy()
             user_after = await db.get_or_create_user(self.pvp_game.winner)
             await economy_logger.log_game(
-                action="pvp_win",
+                game_name="PvP Blackjack",
                 user_id=self.pvp_game.winner,
-                user_name="PvP Winner",  # We don't have name here
+                user_name="PvP Winner",
                 bet=self.pvp_game.bet,
-                winnings=self.pvp_game.pot,
-                profit=self.pvp_game.pot - self.pvp_game.bet,
-                user_before=user_after.balance - self.pvp_game.pot,  # Approximate
+                result="WIN",
+                winnings=total_payout,
+                profit=net_profit,
+                user_before=user_after.balance - total_payout,
                 user_after=user_after.balance,
-                budget_before=economy_after.total_budget,  # Budget unchanged
+                budget_before=budget_before,
                 budget_after=economy_after.total_budget,
-                details={"Pot": f"${self.pvp_game.pot:,.2f}"}
+                details={
+                    "Pot": f"${self.pvp_game.pot:,.2f}",
+                    "Gross Profit": f"${profit:,.2f}",
+                    "Tax": f"${tax:,.2f}",
+                    "Net Profit": f"${net_profit:,.2f}"
+                }
             )
-        # For ties, bets are already deducted, no refund needed (money stays deducted)
+        else:
+            # TIE - refund both players their bets
+            await db.update_user_balance(
+                self.pvp_game.player1_id,
+                self.pvp_game.bet,
+                TransactionType.GAME_WIN,
+                description="PvP Blackjack tie - refund"
+            )
+            await db.update_user_balance(
+                self.pvp_game.player2_id,
+                self.pvp_game.bet,
+                TransactionType.GAME_WIN,
+                description="PvP Blackjack tie - refund"
+            )
     
     def update_buttons(self):
         self.clear_items()
