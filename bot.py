@@ -17,10 +17,13 @@ from dotenv import load_dotenv
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
 
+from sqlalchemy import select, update
+from sqlalchemy.orm import selectinload
+
 from src.services.database import db
 from src.services.cache import cache
 from src.services.economy_logger import EconomyLogger, EconomyAction, economy_logger
-from src.models.database import TransactionType
+from src.models.database import TransactionType, ServerEconomy, User, Transaction, VoiceSession
 from src.utils.helpers import load_config, save_config, is_prime_time, format_balance
 from src.utils.logger import setup_logging, DiscordLogger
 from src.utils.metrics import metrics
@@ -540,6 +543,8 @@ class JJIBot(commands.Bot):
     @tasks.loop(seconds=60)
     async def salary_task(self):
         """Distribute salaries every minute (accumulates for 10min intervals)"""
+        # Reload config to get latest rates
+        self.config = load_config()
         config = self.config
         prime_time = config.get("prime_time", {})
         
@@ -555,81 +560,103 @@ class JJIBot(commands.Bot):
         sergeant_rate = salaries.get("sergeant_per_10min", 20) / 10
         officer_rate = salaries.get("officer_per_10min", 20) / 10
         
-        # Get active voice sessions
-        sessions = await db.get_active_voice_sessions()
-        
-        economy = await db.get_server_economy()
-        remaining_budget = economy.total_budget
-        budget_before = economy.total_budget
-        total_paid = 0
-        total_tax = 0
-        paid_users = []
-        
-        for session in sessions:
-            user = session.user
-            
-            # Determine rate based on role
-            if user.is_officer:
-                rate = officer_rate
-                role_name = "Officer"
-            elif user.is_sergeant:
-                rate = sergeant_rate
-                role_name = "Sergeant"
-            elif user.is_soldier:
-                rate = soldier_rate
-                role_name = "Soldier"
-            else:
-                continue  # No salary for non-role members
-            
-            # Check budget before paying
-            if remaining_budget < rate:
-                self.logger.warning("Server budget depleted! Cannot pay more salaries.")
-                break
-            
-            # Apply salary tax
-            tax_amount = rate * (economy.tax_rate / 100)
-            net_salary = rate - tax_amount
-            
-            user_before = user.balance
-            
-            # Pay salary from server budget (net amount after tax)
-            await db.update_user_balance(
-                user.discord_id,
-                net_salary,
-                TransactionType.SALARY,
-                tax_amount=0,  # Tax already deducted
-                description="SB time salary"
+        # Use single transaction for atomic salary distribution
+        async with db.session() as session:
+            # Lock economy row for update
+            economy_result = await session.execute(
+                select(ServerEconomy).with_for_update()
             )
+            economy = economy_result.scalar_one_or_none()
+            if not economy:
+                return
             
-            remaining_budget -= net_salary  # Only deduct net from budget
-            total_paid += net_salary
-            total_tax += tax_amount
-            paid_users.append(f"{user.discord_id} ({role_name}): +${net_salary:.2f}")
+            remaining_budget = economy.total_budget
+            budget_before = economy.total_budget
+            total_paid = 0
+            total_tax = 0
+            paid_users = []
             
-            # Tax stays in server budget (not deducted)
-            if tax_amount > 0:
-                await db.add_taxes_collected(tax_amount)
-        
-        # Deduct total from server budget in one operation
-        if total_paid > 0:
-            await db.add_rewards_paid(total_paid)  # This deducts from budget and tracks stats
-            self.logger.debug(f"Distributed salaries: {format_balance(total_paid)}")
-            
-            # Log salary distribution (aggregate)
-            economy_after = await db.get_server_economy()
-            await economy_logger.log(
-                action=EconomyAction.BUDGET_SALARY_PAID,
-                amount=total_paid,
-                before_budget=budget_before,
-                after_budget=economy_after.total_budget,
-                description=f"Salary paid to {len(paid_users)} users",
-                details={
-                    "Total Net Paid": f"${total_paid:,.2f}",
-                    "Total Tax Kept": f"${total_tax:,.2f}",
-                    "Users Paid": len(paid_users)
-                },
-                source="SalaryTask"
+            # Get active voice sessions with users
+            sessions_result = await session.execute(
+                select(VoiceSession)
+                .where(VoiceSession.is_active == True)
+                .options(selectinload(VoiceSession.user))
             )
+            sessions = sessions_result.scalars().all()
+            
+            for voice_session in sessions:
+                user = voice_session.user
+
+                # Determine rate based on role
+                if user.is_officer:
+                    rate = officer_rate
+                    role_name = "Officer"
+                elif user.is_sergeant:
+                    rate = sergeant_rate
+                    role_name = "Sergeant"
+                elif user.is_soldier:
+                    rate = soldier_rate
+                    role_name = "Soldier"
+                else:
+                    continue  # No salary for non-role members
+
+                # Check budget before paying
+                if remaining_budget < rate:
+                    self.logger.warning(f"Server budget depleted! Stopping salary distribution. Remaining: {remaining_budget}")
+                    break
+
+                # Apply salary tax
+                tax_amount = rate * (economy.tax_rate / 100)
+                net_salary = rate - tax_amount
+
+                user_before = user.balance
+
+                # Update user balance
+                user.balance += net_salary
+
+                # Log transaction
+                transaction = Transaction(
+                    user_id=user.id,
+                    amount=net_salary,
+                    transaction_type=TransactionType.SALARY,
+                    tax_amount=tax_amount,
+                    before_balance=user_before,
+                    after_balance=user.balance,
+                    description="SB time salary"
+                )
+                session.add(transaction)
+
+                remaining_budget -= net_salary  # Only deduct net from budget
+                total_paid += net_salary
+                total_tax += tax_amount
+                paid_users.append(f"{user.discord_id} ({role_name}): +${net_salary:.2f}")
+
+                # Tax stays in server budget (not deducted), but we track it
+                if tax_amount > 0:
+                    economy.total_taxes_collected += tax_amount
+                    # Tax is already in budget (we didn't deduct it), so no need to add back
+            
+            # Update server economy stats
+            if total_paid > 0:
+                economy.total_rewards_paid += total_paid
+                economy.total_budget -= total_paid
+
+                self.logger.debug(f"Distributed salaries: {format_balance(total_paid)}")
+
+                # Log salary distribution (aggregate)
+                await economy_logger.log(
+                    action=EconomyAction.BUDGET_SALARY_PAID,
+                    amount=total_paid,
+                    before_budget=budget_before,
+                    after_budget=economy.total_budget,
+                    description=f"Salary paid to {len(paid_users)} users",
+                    details={
+                        "Total Net Paid": f"${total_paid:,.2f}",
+                        "Total Tax Kept": f"${total_tax:,.2f}",
+                        "Users Paid": len(paid_users)
+                    },
+                    source="SalaryTask"
+                )
     
     @salary_task.before_loop
     async def before_salary(self):

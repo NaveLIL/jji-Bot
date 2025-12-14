@@ -172,23 +172,59 @@ class OfficerCog(commands.Cog):
         
         await interaction.response.send_message(embed=embed)
     
-    @app_commands.command(name="officer_stats", description="View your recruitment statistics (Officer only)")
+    @app_commands.command(name="officer_stats", description="View recruitment statistics")
+    @app_commands.describe(officer="Officer to view stats for (leave empty for yourself)")
     @rate_limited("officer", limit=5, window=60)
-    @officer_only()
-    async def officer_stats(self, interaction: discord.Interaction):
+    async def officer_stats(
+        self,
+        interaction: discord.Interaction,
+        officer: discord.Member = None
+    ):
         """View officer recruitment stats"""
-        stats = await db.get_officer_stats(interaction.user.id)
+        # Reload config to get latest role IDs
+        self.config = load_config()
+        config = self.config
         
-        config = self.config.get("officer_system", {})
-        accept_reward = config.get("accept_reward", 20)
-        pb_bonus = config.get("pb_10h_bonus", 50)
+        # Check permissions if viewing another user
+        target = officer if officer else interaction.user
+
+        if target.id != interaction.user.id:
+            guest_admin_role_id = config.get("roles", {}).get("guest_admin")
+            is_guest_admin = guest_admin_role_id and any(r.id == guest_admin_role_id for r in interaction.user.roles)
+
+            # Check if regular admin
+            is_admin = interaction.user.guild_permissions.administrator
+
+            if not (is_guest_admin or is_admin):
+                await interaction.response.send_message(
+                    "❌ Only Guest Admins can view other officers' stats!",
+                    ephemeral=True
+                )
+                return
+        else:
+            # Viewing own stats - check if officer
+            officer_role_id = config.get("roles", {}).get("officer")
+            is_officer = officer_role_id and any(r.id == officer_role_id for r in interaction.user.roles)
+
+            if not is_officer:
+                await interaction.response.send_message(
+                    "❌ This command is for officers only.",
+                    ephemeral=True
+                )
+                return
+
+        stats = await db.get_officer_stats(target.id)
+
+        officer_config = config.get("officer_system", {})
+        accept_reward = officer_config.get("accept_reward", 20)
+        pb_bonus = officer_config.get("pb_10h_bonus", 50)
         
         embed = discord.Embed(color=0x3498DB)
         
         embed.description = f"""
 ## 👮 OFFICER STATISTICS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
-**{interaction.user.display_name}**
+**{target.display_name}**
 """
         
         embed.add_field(

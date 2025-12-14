@@ -192,10 +192,28 @@ class ServerEconomy(Base):
     
     __table_args__ = (
         CheckConstraint('tax_rate >= 0 AND tax_rate <= 100', name='check_tax_rate_valid'),
+        CheckConstraint('id = 1', name='check_single_row'),
     )
     
     def __repr__(self) -> str:
         return f"<ServerEconomy(budget={self.total_budget}, tax_rate={self.tax_rate}%)>"
+
+
+class SalaryChange(Base):
+    """Log of salary rate changes"""
+    __tablename__ = "salary_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    changed_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), nullable=False)
+    soldier_rate: Mapped[float] = mapped_column(Float, nullable=False)
+    sergeant_rate: Mapped[float] = mapped_column(Float, nullable=False)
+    officer_rate: Mapped[float] = mapped_column(Float, nullable=False)
+    budget_before: Mapped[float] = mapped_column(Float, nullable=False)
+    budget_after: Mapped[float] = mapped_column(Float, nullable=False)
+    changed_by: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<SalaryChange(date={self.changed_at}, by={self.changed_by})>"
 
 
 class CaseUse(Base):
