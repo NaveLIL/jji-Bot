@@ -166,19 +166,70 @@ class SalaryModal(discord.ui.Modal, title="Set Salary Rates"):
     
     async def on_submit(self, interaction: discord.Interaction):
         try:
+            new_soldier = float(self.soldier.value)
+            new_sergeant = float(self.sergeant.value)
+            new_officer = float(self.officer.value)
+            new_bonus = float(self.master_bonus.value)
+
             config = load_config()
-            config["salaries"]["soldier_per_10min"] = float(self.soldier.value)
-            config["salaries"]["sergeant_per_10min"] = float(self.sergeant.value)
-            config["salaries"]["officer_per_10min"] = float(self.officer.value)
-            config["salaries"]["sergeant_master_bonus"] = float(self.master_bonus.value)
+
+            # Calculate budget impact
+            active_users = await db.get_all_active_users()
+            soldier_count = len([u for u in active_users if u.is_soldier])
+            sergeant_count = len([u for u in active_users if u.is_sergeant])
+            officer_count = len([u for u in active_users if u.is_officer])
+
+            old_salaries = config.get("salaries", {})
+            old_soldier = old_salaries.get("soldier_per_10min", 10)
+            old_sergeant = old_salaries.get("sergeant_per_10min", 20)
+            old_officer = old_salaries.get("officer_per_10min", 20)
+
+            # Cost per hour
+            old_hourly_cost = (soldier_count * old_soldier * 6) + \
+                              (sergeant_count * old_sergeant * 6) + \
+                              (officer_count * old_officer * 6)
+
+            new_hourly_cost = (soldier_count * new_soldier * 6) + \
+                              (sergeant_count * new_sergeant * 6) + \
+                              (officer_count * new_officer * 6)
+
+            hourly_diff = new_hourly_cost - old_hourly_cost
+            daily_diff = hourly_diff * 24  # Show 24h impact as requested
+
+            # Update config
+            config["salaries"]["soldier_per_10min"] = new_soldier
+            config["salaries"]["sergeant_per_10min"] = new_sergeant
+            config["salaries"]["officer_per_10min"] = new_officer
+            config["salaries"]["sergeant_master_bonus"] = new_bonus
             save_config(config)
             
+            # Log changes
+            economy = await db.get_server_economy()
+            async with db.session() as session:
+                from src.models.database import SalaryChange
+                change = SalaryChange(
+                    soldier_rate=new_soldier,
+                    sergeant_rate=new_sergeant,
+                    officer_rate=new_officer,
+                    budget_before=economy.total_budget,
+                    budget_after=economy.total_budget,  # Budget doesn't change immediately
+                    changed_by=interaction.user.id
+                )
+                session.add(change)
+
+            warning = ""
+            if daily_diff > 0:
+                warning = f"\n⚠️ **Budget Impact:** Costs increase by **{format_balance(daily_diff)}/day** (est)"
+            elif daily_diff < 0:
+                warning = f"\n📉 **Budget Impact:** Savings of **{format_balance(abs(daily_diff))}/day** (est)"
+
             await interaction.response.send_message(
                 f"✅ Salary rates updated:\n"
-                f"• Soldier: ${self.soldier.value}/10min\n"
-                f"• Sergeant: ${self.sergeant.value}/10min\n"
-                f"• Officer: ${self.officer.value}/10min\n"
-                f"• Master Bonus: ${self.master_bonus.value}/day",
+                f"• Soldier: ${new_soldier}/10min\n"
+                f"• Sergeant: ${new_sergeant}/10min\n"
+                f"• Officer: ${new_officer}/10min\n"
+                f"• Master Bonus: ${new_bonus}/day"
+                f"{warning}",
                 ephemeral=True
             )
         except ValueError:
