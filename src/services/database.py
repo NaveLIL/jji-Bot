@@ -13,7 +13,7 @@ from sqlalchemy.orm import selectinload
 
 from src.models.database import (
     Base, User, Role, UserRole, Transaction, ServerEconomy, SalaryChange,
-    CaseUse, OfficerLog, ChannelConfig, GameSession, VoiceSession,
+    CaseUse, OfficerLog, ChannelConfig, GameSession, PvPGameSession, VoiceSession,
     RateLimitEntry, SecurityLog, BotStats, TransactionType, RoleType, GameType, LogType
 )
 from src.utils.helpers import calculate_tax
@@ -877,7 +877,423 @@ class DatabaseService:
                 await session.commit()
     
     # ==================== GAME SESSIONS ====================
-    
+
+    async def create_pvp_game_session(
+        self,
+        game_id: str,
+        player_a_id: int,
+        player_b_id: int,
+        player_a_bet: float,
+        player_b_bet: float,
+        state: str,
+        shoe_state: str,
+        player_a_hand: str,
+        player_b_hand: str,
+        dealer_hand: str,
+        ttl_minutes: int = 15
+    ) -> PvPGameSession:
+        """Create a new PvP game session"""
+        async with self.session() as session:
+            # Check for existing active sessions for these players?
+            # Ideally done before calling this, but we can enforce uniqueness if needed.
+
+            # Use get_or_create to ensure user records exist
+            user_a = await self.get_or_create_user(player_a_id)
+            user_b = await self.get_or_create_user(player_b_id)
+
+            game = PvPGameSession(
+                id=game_id,
+                player_a_id=user_a.id,
+                player_b_id=user_b.id,
+                player_a_bet=player_a_bet,
+                player_b_bet=player_b_bet,
+                state=state,
+                shoe_state=shoe_state,
+                player_a_hand=player_a_hand,
+                player_b_hand=player_b_hand,
+                dealer_hand=dealer_hand,
+                expires_at=datetime.utcnow() + timedelta(minutes=ttl_minutes)
+            )
+            session.add(game)
+            await session.commit()
+            return game
+
+    async def get_pvp_game_session(self, game_id: str, for_update: bool = False) -> Optional[PvPGameSession]:
+        """Get PvP game session by ID"""
+        async with self.session() as session:
+            stmt = select(PvPGameSession).where(PvPGameSession.id == game_id)
+            if for_update:
+                stmt = stmt.with_for_update()
+            result = await session.execute(stmt)
+            return result.scalar_one_or_none()
+
+    async def start_pvp_game_atomic(
+        self,
+        game_id: str,
+        player_a_id: int,
+        player_b_id: int,
+        bet_amount: float,
+        state: str,
+        shoe_state: str,
+        player_a_hand: str,
+        player_b_hand: str,
+        dealer_hand: str,
+        ttl_minutes: int = 15
+    ) -> Tuple[bool, str, Optional[PvPGameSession]]:
+        """Atomically deduct bets and create PvP game session"""
+        async with self.session() as session:
+            # Sort IDs to avoid deadlocks
+            first_id, second_id = sorted([player_a_id, player_b_id])
+
+            # Lock users
+            stmt = select(User).where(User.discord_id.in_([first_id, second_id])).order_by(User.discord_id).with_for_update()
+            user_result = await session.execute(stmt)
+            users = {u.discord_id: u for u in user_result.scalars().all()}
+
+            user_a = users.get(player_a_id)
+            user_b = users.get(player_b_id)
+
+            if not user_a:
+                # Should create if missing? Usually callers ensure users exist.
+                # If missing here, it's safer to fail.
+                return False, f"User {player_a_id} not found", None
+            if not user_b:
+                return False, f"User {player_b_id} not found", None
+
+            if user_a.balance < bet_amount:
+                return False, f"<@{player_a_id}> has insufficient funds", None
+            if user_b.balance < bet_amount:
+                return False, f"<@{player_b_id}> has insufficient funds", None
+
+            # Deduct funds
+            # Lock Economy
+            econ_result = await session.execute(select(ServerEconomy).with_for_update())
+            economy = econ_result.scalar_one_or_none()
+            if not economy:
+                 economy = ServerEconomy()
+                 session.add(economy)
+
+            # Update balances and logs
+            user_a.balance -= bet_amount
+            tx_a = Transaction(
+                user_id=user_a.id,
+                amount=-bet_amount,
+                transaction_type=TransactionType.GAME_LOSS,
+                tax_amount=0,
+                before_balance=user_a.balance + bet_amount,
+                after_balance=user_a.balance,
+                description="PvP Blackjack Bet"
+            )
+            session.add(tx_a)
+
+            user_b.balance -= bet_amount
+            tx_b = Transaction(
+                user_id=user_b.id,
+                amount=-bet_amount,
+                transaction_type=TransactionType.GAME_LOSS,
+                tax_amount=0,
+                before_balance=user_b.balance + bet_amount,
+                after_balance=user_b.balance,
+                description="PvP Blackjack Bet"
+            )
+            session.add(tx_b)
+
+            economy.total_budget += (bet_amount * 2)
+
+            # Create Session
+            game = PvPGameSession(
+                id=game_id,
+                player_a_id=user_a.id,
+                player_b_id=user_b.id,
+                player_a_bet=bet_amount,
+                player_b_bet=bet_amount,
+                state=state,
+                shoe_state=shoe_state,
+                player_a_hand=player_a_hand,
+                player_b_hand=player_b_hand,
+                dealer_hand=dealer_hand,
+                expires_at=datetime.utcnow() + timedelta(minutes=ttl_minutes)
+            )
+            session.add(game)
+
+            await session.commit()
+            return True, "Game started", game
+
+    async def update_pvp_game_session(
+        self,
+        game_id: str,
+        state: str,
+        shoe_state: str,
+        player_a_hand: str,
+        player_b_hand: str,
+        dealer_hand: str,
+        current_turn: Optional[int] = None,
+        message_id: Optional[int] = None,
+        channel_id: Optional[int] = None,
+        check_funds_for_player: Optional[int] = None,
+        deduct_amount: float = 0.0
+    ) -> Tuple[bool, str]:
+        """
+        Update PvP game session state.
+        Optionally check funds and deduct amount (for Double/Split).
+        """
+        async with self.session() as session:
+            # If deducting funds, we need to lock the session AND the user
+            game = None
+            if check_funds_for_player:
+                # Lock session first
+                result = await session.execute(
+                    select(PvPGameSession).where(PvPGameSession.id == game_id).with_for_update()
+                )
+                game = result.scalar_one_or_none()
+
+                if not game:
+                    return False, "Game not found"
+
+                # Check turn validity to prevent race conditions?
+                # Assuming caller logic handled turn check, but DB check is safer.
+
+                # Lock User
+                user_res = await session.execute(
+                    select(User).where(User.discord_id == check_funds_for_player).with_for_update()
+                )
+                user = user_res.scalar_one_or_none()
+
+                if not user:
+                    return False, "User not found"
+
+                if user.balance < deduct_amount:
+                    return False, "Insufficient funds"
+
+                # Deduct funds
+                # Lock Economy
+                econ_res = await session.execute(select(ServerEconomy).with_for_update())
+                economy = econ_res.scalar_one_or_none()
+                if not economy: economy = ServerEconomy(); session.add(economy)
+
+                user.balance -= deduct_amount
+                economy.total_budget += deduct_amount
+
+                # Update Game Session bet amounts
+                # If player A, update player_a_bet
+                if user.discord_id == game.player_a_id: # Note: player_a_id is User.id in DB model, wait.
+                    # In PvPGameSession model: player_a_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"))
+                    # user_res above fetched User by discord_id. user.id is the internal ID.
+                    # So we compare user.id with game.player_a_id
+                    pass
+
+                # We need to know which player this is to update the correct bet column
+                if user.id == game.player_a_id:
+                    game.player_a_bet += deduct_amount
+                elif user.id == game.player_b_id:
+                    game.player_b_bet += deduct_amount
+
+                # Log transaction
+                tx = Transaction(
+                    user_id=user.id,
+                    amount=-deduct_amount,
+                    transaction_type=TransactionType.GAME_LOSS,
+                    tax_amount=0,
+                    before_balance=user.balance + deduct_amount,
+                    after_balance=user.balance,
+                    description="PvP Blackjack Extra Bet (Double/Split)"
+                )
+                session.add(tx)
+
+            else:
+                # Just update game state
+                result = await session.execute(
+                    select(PvPGameSession).where(PvPGameSession.id == game_id)
+                )
+                game = result.scalar_one_or_none()
+                if not game:
+                    return False, "Game not found"
+
+            # Apply updates
+            game.state = state
+            game.shoe_state = shoe_state
+            game.player_a_hand = player_a_hand
+            game.player_b_hand = player_b_hand
+            game.dealer_hand = dealer_hand
+            if current_turn is not None:
+                game.current_turn = current_turn
+            if message_id is not None:
+                game.message_id = message_id
+            if channel_id is not None:
+                game.channel_id = channel_id
+
+            await session.commit()
+            return True, "Updated"
+
+    async def delete_pvp_game_session(self, game_id: str) -> None:
+        """Delete PvP game session"""
+        async with self.session() as session:
+             await session.execute(
+                 delete(PvPGameSession).where(PvPGameSession.id == game_id)
+             )
+             await session.commit()
+
+    async def resolve_pvp_payout(
+        self,
+        player_a_id: int,
+        player_b_id: int,
+        player_a_bet: float,
+        player_b_bet: float,
+        results: dict  # Map player_id -> net_profit (can be negative)
+    ) -> dict:
+        """
+        Atomically resolve PvP payouts.
+        results: {player_id: net_profit_excluding_stake}
+        Example:
+          Win 100 bet -> profit 100. Payout = 200 (100 stake + 100 profit).
+          Lose 100 bet -> profit -100. Payout = 0.
+          Push 100 bet -> profit 0. Payout = 100.
+
+        This method assumes bets were ALREADY deducted.
+        It calculates tax on POSITIVE profit.
+        It updates user balances and server budget.
+        """
+        async with self.session() as session:
+            # Lock users
+            stmt = select(User).where(User.discord_id.in_([player_a_id, player_b_id])).order_by(User.discord_id).with_for_update()
+            user_result = await session.execute(stmt)
+            users = {u.discord_id: u for u in user_result.scalars().all()}
+
+            # Lock economy
+            econ_result = await session.execute(select(ServerEconomy).with_for_update())
+            economy = econ_result.scalar_one_or_none()
+            if not economy:
+                 economy = ServerEconomy()
+                 session.add(economy)
+
+            payout_summary = {}
+
+            for pid, bet_amount in [(player_a_id, player_a_bet), (player_b_id, player_b_bet)]:
+                user = users.get(pid)
+                if not user:
+                    continue # Should not happen
+
+                # Get raw result (winnings - losses)
+                # Results dict contains the 'net change' from the game logic perspective.
+                # E.g. blackjack win 1.5x on 100 -> +150
+                # Loss -> -100
+                # Push -> 0
+
+                raw_profit = results.get(pid, 0.0)
+
+                tax = 0.0
+                payout = 0.0
+
+                # If raw_profit is positive, we tax it.
+                # Payout = Bet + Raw_Profit - Tax
+                # But wait, logic:
+                # If I bet 100 and win 150. Raw profit is 150.
+                # Total returned to user = 100 (original) + 150 (win).
+                # Tax is on 150.
+
+                # If I lose 100. Raw profit is -100.
+                # Total returned = 100 - 100 = 0.
+
+                # If Push. Raw profit 0.
+                # Total returned = 100 + 0 = 100.
+
+                # Calculate return amount
+                base_return = bet_amount + raw_profit
+
+                if raw_profit > 0:
+                     # Calculate tax on the profit portion
+                     _, tax = calculate_tax(raw_profit, economy.tax_rate)
+                     final_return = base_return - tax
+
+                     # Update Economy
+                     economy.total_taxes_collected += tax
+                     # Profit comes from budget?
+                     # In closed loop:
+                     # Bet was added to budget when placed.
+                     # Winnings are removed from budget.
+                     # Tax stays in budget.
+
+                     # So we remove (final_return) from budget.
+                     # Wait, if I bet 100, budget +100.
+                     # I win 150. Total return 250. Tax 15 (10% of 150). Net return 235.
+                     # Budget change: +100 (bet) - 235 (payout) = -135.
+                     # Net effect on budget: -135.
+                     # Player profit: +135.
+                     # Tax collected: 15.
+
+                     # Is tax 'staying in budget' correct? Yes.
+                     # If no tax, return 250. Budget -150. Player +150.
+
+                     economy.total_budget -= final_return
+                     economy.total_rewards_paid += final_return # Track payouts
+
+                     # Update User
+                     user.balance += final_return
+
+                     # Log
+                     tx = Transaction(
+                        user_id=user.id,
+                        amount=final_return,
+                        transaction_type=TransactionType.GAME_WIN,
+                        tax_amount=tax,
+                        before_balance=user.balance - final_return,
+                        after_balance=user.balance,
+                        description=f"PvP Blackjack Win (Profit ${raw_profit:.2f})"
+                     )
+                     session.add(tx)
+
+                elif raw_profit < 0:
+                     # Loss.
+                     # Return 0 (assuming full loss).
+                     # Budget keeps the bet.
+                     # If partial loss (surrender), base_return might be > 0.
+
+                     final_return = base_return
+                     if final_return > 0:
+                         economy.total_budget -= final_return
+                         user.balance += final_return
+
+                         tx = Transaction(
+                            user_id=user.id,
+                            amount=final_return,
+                            transaction_type=TransactionType.GAME_WIN, # Technically a return
+                            tax_amount=0,
+                            before_balance=user.balance - final_return,
+                            after_balance=user.balance,
+                            description=f"PvP Blackjack Return (Loss/Surrender)"
+                         )
+                         session.add(tx)
+                     else:
+                         # Full loss, no transaction needed to add 0, but maybe log?
+                         # Usually we log losses when bet is placed.
+                         pass
+
+                else:
+                     # Push (0 profit)
+                     final_return = bet_amount
+                     economy.total_budget -= final_return
+                     user.balance += final_return
+
+                     tx = Transaction(
+                        user_id=user.id,
+                        amount=final_return,
+                        transaction_type=TransactionType.GAME_WIN,
+                        tax_amount=0,
+                        before_balance=user.balance - final_return,
+                        after_balance=user.balance,
+                        description="PvP Blackjack Push"
+                     )
+                     session.add(tx)
+
+                payout_summary[pid] = {
+                    "payout": final_return if 'final_return' in locals() else 0.0,
+                    "tax": tax,
+                    "profit": raw_profit
+                }
+
+            await session.commit()
+            return payout_summary
+
     async def create_game_session(
         self,
         discord_id: int,
