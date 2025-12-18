@@ -90,6 +90,8 @@ class User(Base):
     officer_logs: Mapped[List["OfficerLog"]] = relationship("OfficerLog", back_populates="officer", foreign_keys="OfficerLog.officer_id", cascade="all, delete-orphan")
     recruit_logs: Mapped[List["OfficerLog"]] = relationship("OfficerLog", back_populates="recruit", foreign_keys="OfficerLog.recruit_id")
     game_sessions: Mapped[List["GameSession"]] = relationship("GameSession", back_populates="user", cascade="all, delete-orphan")
+    pvp_sessions_as_a: Mapped[List["PvPGameSession"]] = relationship("PvPGameSession", back_populates="player_a", foreign_keys="PvPGameSession.player_a_id", cascade="all, delete-orphan")
+    pvp_sessions_as_b: Mapped[List["PvPGameSession"]] = relationship("PvPGameSession", back_populates="player_b", foreign_keys="PvPGameSession.player_b_id", cascade="all, delete-orphan")
     voice_sessions: Mapped[List["VoiceSession"]] = relationship("VoiceSession", back_populates="user", cascade="all, delete-orphan")
     
     __table_args__ = (
@@ -296,6 +298,45 @@ class GameSession(Base):
     
     def __repr__(self) -> str:
         return f"<GameSession(user_id={self.user_id}, game={self.game_type})>"
+
+
+class PvPGameSession(Base):
+    """Active PvP game sessions for persistence"""
+    __tablename__ = "pvp_game_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)  # UUID
+    player_a_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    player_b_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    player_a_bet: Mapped[float] = mapped_column(Float, nullable=False)
+    player_b_bet: Mapped[float] = mapped_column(Float, nullable=False)
+
+    state: Mapped[str] = mapped_column(String(50), nullable=False)  # DEALING, PLAYER_A, PLAYER_B, DEALER, RESOLVING
+    shoe_state: Mapped[str] = mapped_column(Text, nullable=False)  # JSON serialized shoe
+
+    player_a_hand: Mapped[str] = mapped_column(Text, nullable=False) # JSON
+    player_b_hand: Mapped[str] = mapped_column(Text, nullable=False) # JSON
+    dealer_hand: Mapped[str] = mapped_column(Text, nullable=False) # JSON
+
+    current_turn: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True) # Discord ID
+    message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    channel_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False) # Auto-cancel
+
+    # Relationships
+    player_a: Mapped["User"] = relationship("User", back_populates="pvp_sessions_as_a", foreign_keys=[player_a_id])
+    player_b: Mapped["User"] = relationship("User", back_populates="pvp_sessions_as_b", foreign_keys=[player_b_id])
+
+    __table_args__ = (
+        CheckConstraint('player_a_bet > 0', name='check_player_a_bet_positive'),
+        CheckConstraint('player_b_bet > 0', name='check_player_b_bet_positive'),
+        Index('idx_pvp_session_players', 'player_a_id', 'player_b_id'),
+        Index('idx_pvp_session_expires', 'expires_at'),
+    )
+
+    def __repr__(self) -> str:
+        return f"<PvPGameSession(id={self.id}, state={self.state})>"
 
 
 class VoiceSession(Base):

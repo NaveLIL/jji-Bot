@@ -10,12 +10,13 @@ from discord.ext import commands
 from typing import Literal, Optional, Dict
 from datetime import datetime, timezone
 import random
+import json
 
 from src.services.database import db
 from src.services.cache import cache
 from src.services.economy_logger import economy_logger, EconomyAction
 from src.models.database import TransactionType, GameType
-from src.games.blackjack import create_blackjack_game, BlackjackGame, GameState
+from src.games.blackjack import create_blackjack_game, BlackjackGame, GameState, PvPBlackjackGame, Shoe, Hand
 from src.games.coinflip import create_coinflip_game, CoinflipResult, CoinSide
 from src.utils.helpers import format_balance, validate_bet, calculate_tax, load_config
 from src.utils.security import rate_limited, game_rate_limited
@@ -58,176 +59,58 @@ def get_fancy_card_display(cards: list, hide_first: bool = False) -> str:
     return " │ ".join(result)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# PVP MATCHMAKING SYSTEM
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class PvPQueue:
-    """Manages PvP matchmaking queue"""
-    
-    def __init__(self):
-        self.waiting: Dict[int, dict] = {}
-        self.active_games: Dict[str, "PvPBlackjackGame"] = {}
-    
-    def add_to_queue(self, user_id: int, bet: float, interaction: discord.Interaction) -> Optional[tuple]:
-        """Add player to queue. Returns matched opponent info if found."""
-        if user_id in self.waiting:
-            return None
-        
-        # Look for opponent with similar bet (within 20%)
-        for opponent_id, data in list(self.waiting.items()):
-            bet_diff = abs(data["bet"] - bet) / max(data["bet"], bet)
-            if bet_diff <= 0.2:
-                opponent_data = self.waiting.pop(opponent_id)
-                return (opponent_id, opponent_data)
-        
-        self.waiting[user_id] = {
-            "bet": bet,
-            "timestamp": datetime.now(timezone.utc),
-            "interaction": interaction
-        }
-        return None
-    
-    def remove_from_queue(self, user_id: int):
-        if user_id in self.waiting:
-            del self.waiting[user_id]
-    
-    def get_queue_size(self) -> int:
-        return len(self.waiting)
-
-
-pvp_queue = PvPQueue()
-
-
-class PvPPlayerHand:
-    """Simple hand for PvP blackjack (no dealer)"""
-    
-    def __init__(self, user_id: int, bet: float):
-        self.user_id = user_id
+class PvPInviteView(discord.ui.View):
+    """View for accepting a PvP challenge"""
+    def __init__(self, challenger_id: int, bet: float, timeout: float = 60):
+        super().__init__(timeout=timeout)
+        self.challenger_id = challenger_id
         self.bet = bet
-        self.cards: list = []
-        self.is_done = False
-        self.is_doubled = False
-        
-        # Card constants
-        self.suits = ["♠", "♥", "♦", "♣"]
-        self.ranks = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
-        
-        # Create a mini deck for this player
-        self.deck = []
-        for suit in self.suits:
-            for rank in self.ranks:
-                self.deck.append(f"{rank}{suit}")
-        random.shuffle(self.deck)
-        
-        # Deal initial 2 cards
-        self.cards.append(self.deck.pop())
-        self.cards.append(self.deck.pop())
-    
-    @property
-    def value(self) -> int:
-        """Calculate hand value"""
-        total = 0
-        aces = 0
-        for card in self.cards:
-            rank = card[:-1]
-            if rank == "A":
-                aces += 1
-                total += 11
-            elif rank in ["K", "Q", "J"]:
-                total += 10
-            else:
-                total += int(rank)
-        
-        while total > 21 and aces > 0:
-            total -= 10
-            aces -= 1
-        return total
-    
-    @property
-    def is_bust(self) -> bool:
-        return self.value > 21
-    
-    @property
-    def is_blackjack(self) -> bool:
-        return len(self.cards) == 2 and self.value == 21
-    
-    def hit(self):
-        """Draw a card"""
-        if not self.is_done and not self.is_bust:
-            self.cards.append(self.deck.pop())
-            if self.is_bust:
-                self.is_done = True
-    
-    def stand(self):
-        """Stand"""
-        self.is_done = True
-    
-    def double_down(self):
-        """Double down - one more card and done"""
-        if len(self.cards) == 2 and not self.is_done:
-            self.is_doubled = True
-            self.bet *= 2
-            self.cards.append(self.deck.pop())
-            self.is_done = True
+        self.accepted = False
+        self.message: discord.Message = None
 
+    @discord.ui.button(label="ACCEPT CHALLENGE", style=discord.ButtonStyle.success, emoji="⚔️")
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Prevent challenger from accepting their own invite (though they shouldn't see it if logic is right)
+        if interaction.user.id == self.challenger_id:
+            await interaction.response.send_message("❌ You can't accept your own challenge!", ephemeral=True)
+            return
 
-class PvPBlackjackGame:
-    """PvP Blackjack game between two players"""
-    
-    def __init__(self, player1_id: int, player2_id: int, bet: float):
-        self.player1_id = player1_id
-        self.player2_id = player2_id
-        self.bet = bet
-        self.pot = bet * 2
+        self.accepted = True
+        self.stop()
         
-        # Create simple PvP hands instead of full games
-        self.hand1 = PvPPlayerHand(player1_id, bet)
-        self.hand2 = PvPPlayerHand(player2_id, bet)
+        # Start game logic handled in command
+        # Here we just validate balance and signal acceptance
         
-        self.winner: Optional[int] = None
-        self.is_complete = False
-        self.paid_out = False
-    
-    def get_player_hand(self, user_id: int) -> Optional[PvPPlayerHand]:
-        if user_id == self.player1_id:
-            return self.hand1
-        elif user_id == self.player2_id:
-            return self.hand2
-        return None
-    
-    def check_complete(self):
-        """Check if both players are done"""
-        if self.hand1.is_done and self.hand2.is_done:
-            self._determine_winner()
-    
-    def mark_player_done(self, user_id: int):
-        hand = self.get_player_hand(user_id)
-        if hand:
-            hand.is_done = True
-            self.check_complete()
-    
-    def _determine_winner(self):
-        self.is_complete = True
+        user = await db.get_or_create_user(interaction.user.id)
+        if user.balance < self.bet:
+            await interaction.response.send_message(f"❌ You don't have enough funds! Need **{format_balance(self.bet)}**.", ephemeral=True)
+            self.accepted = False
+            return
+
+        # Disable buttons
+        for item in self.children:
+            item.disabled = True
         
-        # Get scores (bust = 0)
-        score1 = self.hand1.value if not self.hand1.is_bust else 0
-        score2 = self.hand2.value if not self.hand2.is_bust else 0
+        # Edit the message first to show it's being processed and prevent double clicks
+        await interaction.response.edit_message(view=self)
         
-        # Blackjack beats 21 from multiple cards
-        bj1 = self.hand1.is_blackjack
-        bj2 = self.hand2.is_blackjack
-        
-        if bj1 and not bj2:
-            self.winner = self.player1_id
-        elif bj2 and not bj1:
-            self.winner = self.player2_id
-        elif score1 > score2:
-            self.winner = self.player1_id
-        elif score2 > score1:
-            self.winner = self.player2_id
-        else:
-            self.winner = None  # Tie
+        # Proceed to start game
+        await self.cog.start_pvp_game(interaction, self.challenger_id, interaction.user.id, self.bet)
+
+    @discord.ui.button(label="DECLINE", style=discord.ButtonStyle.danger, emoji="✖️")
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id == self.challenger_id:
+             # Challenger cancelling
+             await interaction.response.send_message("Challenge cancelled.", ephemeral=True)
+             self.stop()
+             await self.message.delete()
+             # Refund challenger handled by timeout/cancellation logic in command?
+             # If command waits, it will see self.accepted is False.
+             return
+
+        await interaction.response.send_message("Challenge declined.", ephemeral=True)
+        self.stop()
+        await self.message.delete()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -765,256 +648,162 @@ class QuitButton(discord.ui.Button):
 class PvPBlackjackView(discord.ui.View):
     """PvP Blackjack game view"""
     
-    def __init__(self, pvp_game: PvPBlackjackGame, player_id: int, cog: "GamesCog", timeout: float = 300):
+    def __init__(self, game_id: str, pvp_game: PvPBlackjackGame, cog: "GamesCog", timeout: float = 300):
         super().__init__(timeout=timeout)
+        self.game_id = game_id
         self.pvp_game = pvp_game
-        self.player_id = player_id
         self.cog = cog
         self.message: discord.Message = None
         self.update_buttons()
     
-    @property
-    def hand(self) -> PvPPlayerHand:
-        return self.pvp_game.get_player_hand(self.player_id)
-    
-    async def handle_completion(self):
-        """Handle payout when game completes"""
-        if self.pvp_game.paid_out:
-            return
-        
-        self.pvp_game.paid_out = True
-        economy = await db.get_server_economy()
-        budget_before = economy.total_budget
-        
-        if self.pvp_game.winner:
-            # Winner takes the pot - route through server budget with tax
-            profit = self.pvp_game.pot - self.pvp_game.bet  # Winner's profit
-            
-            # Apply tax only on profit (not on bet return)
-            net_profit, tax = calculate_tax(profit, economy.tax_rate)
-            total_payout = self.pvp_game.bet + net_profit  # Bet back + taxed profit
-            
-            # PvP pot goes to server budget first (closed-loop)
-            await db.update_server_budget(self.pvp_game.pot, add=True)
-            
-            # Then pay winner from server budget
-            await db.update_server_budget(total_payout, add=False)
-            
-            await db.update_user_balance(
-                self.pvp_game.winner,
-                total_payout,
-                TransactionType.GAME_WIN,
-                description="PvP Blackjack win"
-            )
-            
-            # Track taxes
-            if tax > 0:
-                await db.add_taxes_collected(tax)
-                metrics.track_tax(tax)
-            
-            # Log the PvP result
-            economy_after = await db.get_server_economy()
-            user_after = await db.get_or_create_user(self.pvp_game.winner)
-            await economy_logger.log_game(
-                game_name="PvP Blackjack",
-                user_id=self.pvp_game.winner,
-                user_name="PvP Winner",
-                bet=self.pvp_game.bet,
-                result="WIN",
-                winnings=total_payout,
-                profit=net_profit,
-                user_before=user_after.balance - total_payout,
-                user_after=user_after.balance,
-                budget_before=budget_before,
-                budget_after=economy_after.total_budget,
-                details={
-                    "Pot": f"${self.pvp_game.pot:,.2f}",
-                    "Gross Profit": f"${profit:,.2f}",
-                    "Tax": f"${tax:,.2f}",
-                    "Net Profit": f"${net_profit:,.2f}"
-                }
-            )
-        else:
-            # TIE - refund both players their bets
-            await db.update_user_balance(
-                self.pvp_game.player1_id,
-                self.pvp_game.bet,
-                TransactionType.GAME_WIN,
-                description="PvP Blackjack tie - refund"
-            )
-            await db.update_user_balance(
-                self.pvp_game.player2_id,
-                self.pvp_game.bet,
-                TransactionType.GAME_WIN,
-                description="PvP Blackjack tie - refund"
-            )
-    
     def update_buttons(self):
         self.clear_items()
         
-        # Handle completion payout if just completed
-        if self.pvp_game.is_complete and not self.pvp_game.paid_out:
-            self.handle_completion()
-        
-        my_hand = self.hand
-        if my_hand.is_done:
-            if not self.pvp_game.is_complete:
-                self.add_item(WaitingButton())
+        if self.pvp_game.state == GameState.COMPLETE:
+            # Maybe a close button or stats?
             return
         
-        # Always can hit and stand
-        self.add_item(PvPHitButton())
-        self.add_item(PvPStandButton())
+        # Buttons for current turn player
+        current_turn = self.pvp_game.current_turn_player_id
         
-        # Can only double with 2 cards
-        if len(my_hand.cards) == 2:
-            self.add_item(PvPDoubleButton())
-    
+        if current_turn:
+            self.add_item(PvPHitButton(current_turn))
+            self.add_item(PvPStandButton(current_turn))
+
+            # Double check
+            hand = self.pvp_game.current_active_hand
+            if hand and hand.can_double:
+                self.add_item(PvPDoubleButton(current_turn))
+
+            if hand and hand.can_split:
+                self.add_item(PvPSplitButton(current_turn))
+
     def get_embed(self) -> discord.Embed:
-        is_player1 = self.player_id == self.pvp_game.player1_id
-        opponent_id = self.pvp_game.player2_id if is_player1 else self.pvp_game.player1_id
-        
-        if self.pvp_game.is_complete:
-            if self.pvp_game.winner == self.player_id:
-                color = 0x00FF00
-                status = "🏆 YOU WIN THE DUEL!"
-            elif self.pvp_game.winner is None:
-                color = 0xFFD700
-                status = "🤝 IT'S A TIE!"
-            else:
-                color = 0xFF0000
-                status = "💀 YOU LOSE THE DUEL"
+        # Determine status color/text
+        if self.pvp_game.state == GameState.PLAYER_A_TURN:
+            status = f"🎲 <@{self.pvp_game.player_a_id}>'s TURN"
+            color = 0x3498DB
+        elif self.pvp_game.state == GameState.PLAYER_B_TURN:
+            status = f"🎲 <@{self.pvp_game.player_b_id}>'s TURN"
+            color = 0xE67E22
+        elif self.pvp_game.state == GameState.COMPLETE:
+            status = "🏁 GAME OVER"
+            color = 0x2ECC71
         else:
-            color = 0x9B59B6
-            status = "⚔️ PVP BLACKJACK"
-        
+            status = "⏳ WAITING"
+            color = 0x95A5A6
+
         embed = discord.Embed(
             title="⚔️ PVP BLACKJACK DUEL",
-            description=f"```ansi\n\u001b[1;35m{status}\u001b[0m\n```",
+            description=f"```ansi\n\u001b[1;37m{status}\u001b[0m\n```",
             color=color
         )
         
-        embed.add_field(name="💰 POT", value=f"**{format_balance(self.pvp_game.pot)}**", inline=True)
-        embed.add_field(name="🎯 OPPONENT", value=f"<@{opponent_id}>", inline=True)
-        
-        my_hand = self.hand
-        player_value = my_hand.value
-        value_display = f"**{player_value}**" if not my_hand.is_bust else f"~~{player_value}~~ BUST"
-        
-        embed.add_field(
-            name=f"🃏 YOUR HAND — {value_display}",
-            value=get_fancy_card_display(my_hand.cards),
-            inline=False
-        )
-        
-        opponent_hand = self.pvp_game.get_player_hand(opponent_id)
-        if opponent_hand.is_done or self.pvp_game.is_complete:
-            opp_value = opponent_hand.value
-            opp_display = f"**{opp_value}**" if not opponent_hand.is_bust else f"~~{opp_value}~~ BUST"
-            embed.add_field(
-                name=f"👤 OPPONENT'S HAND — {opp_display}",
-                value=get_fancy_card_display(opponent_hand.cards),
-                inline=False
-            )
+        # Dealer
+        dealer_hand = self.pvp_game.dealer_hand
+        if self.pvp_game.state == GameState.COMPLETE:
+            dealer_val = dealer_hand.value
+            dealer_display = get_fancy_card_display([c.to_dict()["rank"]+c.to_dict()["suit"] for c in dealer_hand.cards], hide_first=False)
+            embed.add_field(name=f"🎩 DEALER — {dealer_val}", value=f"```\n{dealer_display}\n```", inline=False)
         else:
-            embed.add_field(name="👤 OPPONENT'S HAND", value="*Still playing...*", inline=False)
+            dealer_display = get_fancy_card_display([c.to_dict()["rank"]+c.to_dict()["suit"] for c in dealer_hand.cards], hide_first=True)
+            embed.add_field(name="🎩 DEALER — ?", value=f"```\n{dealer_display}\n```", inline=False)
+
+        # Player A
+        a_hands_display = []
+        for i, hand in enumerate(self.pvp_game.player_a_hands):
+            cards = [c.to_dict()["rank"]+c.to_dict()["suit"] for c in hand.cards]
+            val = hand.value
+            val_str = f"**{val}**"
+            if hand.is_bust: val_str = f"~~{val}~~ BUST"
+            elif hand.is_blackjack: val_str = f"**{val}** BJ!"
+
+            indicator = "👉" if self.pvp_game.state == GameState.PLAYER_A_TURN and i == self.pvp_game.current_hand_index_a else ""
+            a_hands_display.append(f"{indicator} Hand {i+1}: {get_fancy_card_display(cards)} ({val_str})")
+
+        embed.add_field(name=f"👤 Player A (<@{self.pvp_game.player_a_id}>) - ${self.pvp_game.player_a_bet}", value="\n".join(a_hands_display), inline=False)
+
+        # Player B
+        b_hands_display = []
+        for i, hand in enumerate(self.pvp_game.player_b_hands):
+            cards = [c.to_dict()["rank"]+c.to_dict()["suit"] for c in hand.cards]
+            val = hand.value
+            val_str = f"**{val}**"
+            if hand.is_bust: val_str = f"~~{val}~~ BUST"
+            elif hand.is_blackjack: val_str = f"**{val}** BJ!"
+
+            indicator = "👉" if self.pvp_game.state == GameState.PLAYER_B_TURN and i == self.pvp_game.current_hand_index_b else ""
+            b_hands_display.append(f"{indicator} Hand {i+1}: {get_fancy_card_display(cards)} ({val_str})")
+
+        embed.add_field(name=f"👤 Player B (<@{self.pvp_game.player_b_id}>) - ${self.pvp_game.player_b_bet}", value="\n".join(b_hands_display), inline=False)
         
-        if self.pvp_game.is_complete:
-            if self.pvp_game.winner == self.player_id:
-                embed.add_field(name="💎 YOUR WINNINGS", value=f"```diff\n+ {format_balance(self.pvp_game.pot)}\n```", inline=False)
-            elif self.pvp_game.winner is None:
-                embed.add_field(name="⚖️ TIE", value="Your bet has been refunded.", inline=False)
-        
-        embed.set_footer(text="PvP Blackjack • Developed by NaveL for JJI in 2025")
+        # Results
+        if self.pvp_game.state == GameState.COMPLETE:
+            res_str = ""
+            if self.pvp_game.player_a_id in self.pvp_game.results:
+                res = self.pvp_game.results[self.pvp_game.player_a_id]
+                total_profit = sum(r[1] for r in res)
+                res_str += f"<@{self.pvp_game.player_a_id}>: {'+' if total_profit >= 0 else ''}{total_profit:.0f}\n"
+
+            if self.pvp_game.player_b_id in self.pvp_game.results:
+                res = self.pvp_game.results[self.pvp_game.player_b_id]
+                total_profit = sum(r[1] for r in res)
+                res_str += f"<@{self.pvp_game.player_b_id}>: {'+' if total_profit >= 0 else ''}{total_profit:.0f}\n"
+
+            embed.add_field(name="📊 RESULTS", value=res_str, inline=False)
+
         return embed
 
+    async def on_timeout(self):
+        if self.pvp_game.state != GameState.COMPLETE:
+            # Auto-stand current player
+            current_id = self.pvp_game.current_turn_player_id
+            if current_id:
+                await self.cog.process_pvp_action(self.game_id, "stand", current_id, None)
 
 class PvPHitButton(discord.ui.Button):
-    def __init__(self):
+    def __init__(self, player_id: int):
         super().__init__(label="HIT", style=discord.ButtonStyle.primary, emoji="🎴")
+        self.player_id = player_id
     
     async def callback(self, interaction: discord.Interaction):
-        view: PvPBlackjackView = self.view
-        if interaction.user.id != view.player_id:
-            await interaction.response.send_message("❌ This isn't your game!", ephemeral=True)
+        if interaction.user.id != self.player_id:
+            await interaction.response.send_message("❌ Not your turn!", ephemeral=True)
             return
-        
-        view.hand.hit()
-        if view.hand.is_bust:
-            view.pvp_game.mark_player_done(view.player_id)
-        view.update_buttons()
-        await interaction.response.edit_message(embed=view.get_embed(), view=view)
-
+        await self.view.cog.process_pvp_action(self.view.game_id, "hit", self.player_id, interaction)
 
 class PvPStandButton(discord.ui.Button):
-    def __init__(self):
+    def __init__(self, player_id: int):
         super().__init__(label="STAND", style=discord.ButtonStyle.secondary, emoji="🛑")
+        self.player_id = player_id
     
     async def callback(self, interaction: discord.Interaction):
-        view: PvPBlackjackView = self.view
-        if interaction.user.id != view.player_id:
-            await interaction.response.send_message("❌ This isn't your game!", ephemeral=True)
+        if interaction.user.id != self.player_id:
+            await interaction.response.send_message("❌ Not your turn!", ephemeral=True)
             return
-        
-        view.hand.stand()
-        view.pvp_game.mark_player_done(view.player_id)
-        view.update_buttons()
-        await interaction.response.edit_message(embed=view.get_embed(), view=view)
-
+        await self.view.cog.process_pvp_action(self.view.game_id, "stand", self.player_id, interaction)
 
 class PvPDoubleButton(discord.ui.Button):
-    def __init__(self):
+    def __init__(self, player_id: int):
         super().__init__(label="DOUBLE", style=discord.ButtonStyle.success, emoji="💰")
+        self.player_id = player_id
     
     async def callback(self, interaction: discord.Interaction):
-        view: PvPBlackjackView = self.view
-        if interaction.user.id != view.player_id:
-            await interaction.response.send_message("❌ This isn't your game!", ephemeral=True)
+        if interaction.user.id != self.player_id:
+            await interaction.response.send_message("❌ Not your turn!", ephemeral=True)
             return
-        
-        user = await db.get_or_create_user(view.player_id)
-        double_cost = view.hand.bet
-        
-        if user.balance < double_cost:
-            await interaction.response.send_message(f"❌ Insufficient balance! Need **{format_balance(double_cost)}**", ephemeral=True)
+        await self.view.cog.process_pvp_action(self.view.game_id, "double", self.player_id, interaction)
+
+class PvPSplitButton(discord.ui.Button):
+    def __init__(self, player_id: int):
+        super().__init__(label="SPLIT", style=discord.ButtonStyle.success, emoji="✂️")
+        self.player_id = player_id
+    
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.player_id:
+            await interaction.response.send_message("❌ Not your turn!", ephemeral=True)
             return
-        
-        await db.update_user_balance(view.player_id, -double_cost, TransactionType.GAME_LOSS)
-        view.pvp_game.pot += double_cost
-        view.hand.double_down()
-        view.pvp_game.mark_player_done(view.player_id)
-        view.update_buttons()
-        await interaction.response.edit_message(embed=view.get_embed(), view=view)
-
-
-class WaitingButton(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="Waiting for opponent...", style=discord.ButtonStyle.secondary, emoji="⏳", disabled=True)
-
-
-class PvPQueueView(discord.ui.View):
-    """View while waiting in PvP queue"""
-    
-    def __init__(self, user_id: int, bet: float, timeout: float = 120):
-        super().__init__(timeout=timeout)
-        self.user_id = user_id
-        self.bet = bet
-    
-    @discord.ui.button(label="CANCEL", style=discord.ButtonStyle.danger, emoji="❌")
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("❌ This isn't your queue!", ephemeral=True)
-            return
-        
-        pvp_queue.remove_from_queue(self.user_id)
-        await db.update_user_balance(self.user_id, self.bet, TransactionType.GAME_WIN, description="PvP queue cancelled - refund")
-        
-        embed = discord.Embed(title="⚔️ PVP BLACKJACK", description="Queue cancelled. Your bet has been refunded.", color=0xFF0000)
-        await interaction.response.edit_message(embed=embed, view=None)
-    
-    async def on_timeout(self):
-        pvp_queue.remove_from_queue(self.user_id)
-        await db.update_user_balance(self.user_id, self.bet, TransactionType.GAME_WIN, description="PvP queue timeout - refund")
+        await self.view.cog.process_pvp_action(self.view.game_id, "split", self.player_id, interaction)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1085,9 +874,17 @@ class GamesCog(commands.Cog):
         metrics.set_active_games("blackjack", 1)
     
     @app_commands.command(name="blackjack_pvp", description="⚔️ Challenge another player to Blackjack PvP!")
-    @app_commands.describe(bet="Amount to bet - will be matched by opponent")
-    async def blackjack_pvp(self, interaction: discord.Interaction, bet: float):
-        """Join PvP blackjack queue"""
+    @app_commands.describe(opponent="The player you want to challenge", bet="Amount to bet")
+    async def blackjack_pvp(self, interaction: discord.Interaction, opponent: discord.User, bet: float):
+        """Start a PvP blackjack game"""
+        if opponent.id == interaction.user.id:
+            await interaction.response.send_message("❌ You can't challenge yourself!", ephemeral=True)
+            return
+
+        if opponent.bot:
+            await interaction.response.send_message("❌ You can't challenge a bot!", ephemeral=True)
+            return
+
         user = await db.get_or_create_user(interaction.user.id)
         
         config = self.config.get("economy", {})
@@ -1098,41 +895,213 @@ class GamesCog(commands.Cog):
         if not is_valid:
             await interaction.response.send_message(f"❌ {error}", ephemeral=True)
             return
+
+        # Create invite view
+        view = PvPInviteView(challenger_id=interaction.user.id, bet=bet)
+        view.cog = self
+
+        embed = discord.Embed(
+            title="⚔️ PVP BLACKJACK CHALLENGE",
+            description=f"<@{interaction.user.id}> challenges <@{opponent.id}> to a duel!",
+            color=0x9B59B6
+        )
+        embed.add_field(name="💰 Bet", value=format_balance(bet))
+        embed.set_footer(text=f"Waiting for {opponent.display_name} to accept...")
+
+        await interaction.response.send_message(content=f"<@{opponent.id}>", embed=embed, view=view)
+        view.message = await interaction.original_response()
+
+    async def start_pvp_game(self, interaction: discord.Interaction, p1_id: int, p2_id: int, bet: float):
+        # 1. Lock funds and Create Session Atomically
+        # Re-check balances (Double check before DB op, though DB op handles locking)
+        u1 = await db.get_user(p1_id)
+        u2 = await db.get_user(p2_id)
+
+        if u1.balance < bet or u2.balance < bet:
+            await interaction.followup.send("❌ One of the players has insufficient funds now!", ephemeral=True)
+            return
+
+        # 2. Init Game
+        import uuid
+        game_id = str(uuid.uuid4())
+
+        shoe = Shoe(deck_count=6)
+        game = PvPBlackjackGame(
+            player_a_id=p1_id,
+            player_b_id=p2_id,
+            player_a_bet=bet,
+            player_b_bet=bet,
+            shoe=shoe
+        )
+        game.deal_initial()
+
+        # 3. Create Session in DB Atomically with Bet Deduction
+        success, msg, session = await db.start_pvp_game_atomic(
+            game_id=game_id,
+            player_a_id=p1_id,
+            player_b_id=p2_id,
+            bet_amount=bet,
+            state=game.state.value,
+            shoe_state=json.dumps(game.shoe.to_dict()),
+            player_a_hand=json.dumps([h.to_dict() for h in game.player_a_hands]),
+            player_b_hand=json.dumps([h.to_dict() for h in game.player_b_hands]),
+            dealer_hand=json.dumps(game.dealer_hand.to_dict())
+        )
+
+        if not success:
+            await interaction.followup.send(f"❌ Failed to start game: {msg}", ephemeral=True)
+            return
         
-        await db.update_user_balance(interaction.user.id, -bet, TransactionType.GAME_LOSS, description="PvP Blackjack bet")
+        # 4. Show Board
+        # Use short timeout for turn actions
+        view = PvPBlackjackView(game_id, game, self, timeout=30)
+        embed = view.get_embed()
         
-        match = pvp_queue.add_to_queue(interaction.user.id, bet, interaction)
+        # Use followup since the interaction was already responded to in the View
+        message = await interaction.followup.send(embed=embed, view=view)
+        view.message = message
         
-        if match:
-            opponent_id, opponent_data = match
+        # Update session with message ID
+        await db.update_pvp_game_session(game_id=game_id, state=game.state.value, shoe_state=json.dumps(game.shoe.to_dict()), player_a_hand=json.dumps([h.to_dict() for h in game.player_a_hands]), player_b_hand=json.dumps([h.to_dict() for h in game.player_b_hands]), dealer_hand=json.dumps(game.dealer_hand.to_dict()), message_id=view.message.id, channel_id=view.message.channel.id)
+
+    async def process_pvp_action(self, game_id: str, action: str, user_id: int, interaction: Optional[discord.Interaction]):
+        # Load game with locking for update if needed
+        # But we need to know what action it is first?
+        # Actually, get_pvp_game_session logic handles 'for_update' flag.
+        # But we don't know if we need update yet?
+        # We can just always lock for consistency in actions to prevent race conditions.
+
+        session = await db.get_pvp_game_session(game_id, for_update=True)
+        if not session:
+            if interaction: await interaction.response.send_message("❌ Game not found!", ephemeral=True)
+            return
             
-            pvp_game = PvPBlackjackGame(player1_id=opponent_id, player2_id=interaction.user.id, bet=min(bet, opponent_data["bet"]))
+        # Reconstruct Game Object
+        game = PvPBlackjackGame(
+            player_a_id=session.player_a_id,
+            player_b_id=session.player_b_id,
+            player_a_bet=session.player_a_bet,
+            player_b_bet=session.player_b_bet,
+            shoe=Shoe.from_dict(json.loads(session.shoe_state))
+        )
+        game.state = GameState(session.state)
+        game.player_a_hands = [Hand.from_dict(h) for h in json.loads(session.player_a_hand)]
+        game.player_b_hands = [Hand.from_dict(h) for h in json.loads(session.player_b_hand)]
+        game.dealer_hand = Hand.from_dict(json.loads(session.dealer_hand))
+        if session.current_turn: # Logic uses internal state for turn, but we verify
+             pass
+
+        # Apply Action
+        updated = False
+        check_funds_amount = 0.0
+
+        # Calculate cost for Double/Split
+        if action in ["double", "split"]:
+            hand = game.current_active_hand
+            if hand:
+                check_funds_amount = hand.bet
+
+        if action == "hit":
+            bust, _ = game.hit(user_id)
+            updated = True
+        elif action == "stand":
+            game.stand(user_id)
+            updated = True
+        elif action == "double":
+            game.double(user_id)
+            updated = True
+        elif action == "split":
+            game.split(user_id)
+            updated = True
             
-            game_id = f"{opponent_id}_{interaction.user.id}"
-            pvp_queue.active_games[game_id] = pvp_game
-            
-            view1 = PvPBlackjackView(pvp_game, opponent_id, self)
-            view2 = PvPBlackjackView(pvp_game, interaction.user.id, self)
-            
-            try:
-                opp_interaction = opponent_data["interaction"]
-                await opp_interaction.edit_original_response(embed=view1.get_embed(), view=view1)
-            except:
-                pass
-            
-            await interaction.response.send_message(embed=view2.get_embed(), view=view2)
-        else:
-            embed = discord.Embed(
-                title="⚔️ PVP BLACKJACK QUEUE",
-                description="```ansi\n\u001b[1;33mSearching for opponent...\u001b[0m\n```",
-                color=0x9B59B6
+        if updated:
+            # Save State with Fund Check if needed
+            success, msg = await db.update_pvp_game_session(
+                game_id=game_id,
+                state=game.state.value,
+                shoe_state=json.dumps(game.shoe.to_dict()),
+                player_a_hand=json.dumps([h.to_dict() for h in game.player_a_hands]),
+                player_b_hand=json.dumps([h.to_dict() for h in game.player_b_hands]),
+                dealer_hand=json.dumps(game.dealer_hand.to_dict()),
+                current_turn=game.current_turn_player_id,
+                check_funds_for_player=user_id if check_funds_amount > 0 else None,
+                deduct_amount=check_funds_amount
             )
-            embed.add_field(name="💰 Your Bet", value=format_balance(bet), inline=True)
-            embed.add_field(name="👥 In Queue", value=str(pvp_queue.get_queue_size()), inline=True)
-            embed.set_footer(text="You'll be matched with a player betting a similar amount...")
             
-            view = PvPQueueView(interaction.user.id, bet)
-            await interaction.response.send_message(embed=embed, view=view)
+            if not success:
+                if interaction:
+                    await interaction.response.send_message(f"❌ Action failed: {msg}", ephemeral=True)
+                return
+            
+            # Update UI
+            # If interaction exists, edit message.
+            # If auto-stand (timeout), use stored message_id.
+            
+            view = PvPBlackjackView(game_id, game, self)
+            embed = view.get_embed()
+
+            if interaction:
+                await interaction.response.edit_message(embed=embed, view=view)
+            else:
+                # Fetch message
+                try:
+                    channel = self.bot.get_channel(session.channel_id)
+                    message = await channel.fetch_message(session.message_id)
+                    await message.edit(embed=embed, view=view)
+                except:
+                    pass
+            
+            # If Complete, Payout
+            if game.state == GameState.COMPLETE:
+                # Construct results dict {uid: profit}
+                # profit = payout - bet
+                # The resolve_pvp_payout method expects 'net_profit_excluding_stake'
+
+                # Our game.results is {uid: [(Result, Payout_Amount), ...]}
+                # Payout_Amount includes the stake return.
+                # So if I bet 100 and win (200 returned), logic result is 200.
+                # Net profit is 100.
+                # resolve_pvp_payout adds net_profit to base_bet.
+
+                # Wait, resolve_pvp_payout logic:
+                # base_return = bet_amount + raw_profit
+                # if I win 200 total (100 bet + 100 win), raw_profit should be 100.
+
+                # game.results returns total payout amount.
+                # So raw_profit = payout - original_bet.
+
+                payout_map = {}
+
+                # Player A
+                if game.player_a_id in game.results:
+                    total_payout_a = sum(amount for _, amount in game.results[game.player_a_id])
+                    # Note: game results returns signed amounts.
+                    # Win: +bet (profit only? No, let's check logic)
+
+                    # logic: results.append((HandResult.WIN, hand.bet * multiplier))
+                    # If I bet 100, WIN returns 100.
+                    # If I get BJ, BLACKJACK returns 150.
+                    # If I LOSE, returns -100.
+                    # If PUSH, returns 0.
+
+                    # So game.results IS the net profit!
+                    payout_map[game.player_a_id] = total_payout_a
+
+                # Player B
+                if game.player_b_id in game.results:
+                    total_payout_b = sum(amount for _, amount in game.results[game.player_b_id])
+                    payout_map[game.player_b_id] = total_payout_b
+
+                await db.resolve_pvp_payout(
+                    player_a_id=game.player_a_id,
+                    player_b_id=game.player_b_id,
+                    player_a_bet=game.player_a_bet,
+                    player_b_bet=game.player_b_bet,
+                    results=payout_map
+                )
+
+                # Delete session
+                await db.delete_pvp_game_session(game_id)
     
     @app_commands.command(name="coinflip", description="🪙 Flip a coin - heads or tails! (Private game)")
     @app_commands.describe(bet="Amount to bet ($1 - $10,000)", side="Choose your side")
