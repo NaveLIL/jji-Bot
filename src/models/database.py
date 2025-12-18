@@ -93,7 +93,7 @@ class User(Base):
     voice_sessions: Mapped[List["VoiceSession"]] = relationship("VoiceSession", back_populates="user", cascade="all, delete-orphan")
     
     __table_args__ = (
-        CheckConstraint('balance >= 0', name='check_balance_non_negative'),
+        CheckConstraint('balance >= 0', name='check_user_balance_non_negative'),
         Index('idx_user_balance', 'balance'),
         Index('idx_user_pb_time', 'total_pb_time'),
     )
@@ -289,6 +289,7 @@ class GameSession(Base):
     user: Mapped["User"] = relationship("User", back_populates="game_sessions")
     
     __table_args__ = (
+        CheckConstraint('bet_amount > 0', name='check_bet_amount_positive'),
         Index('idx_game_session_user', 'user_id', 'game_type'),
         Index('idx_game_session_expires', 'expires_at'),
     )
@@ -315,6 +316,7 @@ class VoiceSession(Base):
     user: Mapped["User"] = relationship("User", back_populates="voice_sessions")
     
     __table_args__ = (
+        CheckConstraint('duration_seconds >= 0', name='check_duration_non_negative'),
         Index('idx_voice_session_active', 'user_id', 'is_active'),
     )
     

@@ -113,51 +113,43 @@ class EconomyCog(commands.Cog):
         economy = await db.get_server_economy()
         net_amount, tax_amount = calculate_tax(amount, economy.tax_rate)
         
-        # Process transfer
-        success, before, after = await db.update_user_balance(
-            interaction.user.id,
-            -amount,
-            TransactionType.TRANSFER_OUT,
-            description=f"Transfer to {user.display_name}",
-            related_user_id=user.id
+        # Process transfer (ATOMICALLY)
+        result = await db.transfer_money(
+            sender_id=interaction.user.id,
+            recipient_id=user.id,
+            amount=amount,
+            description=f"Transfer from {interaction.user.display_name} to {user.display_name}"
         )
         
-        if not success:
+        if not result["success"]:
             await interaction.response.send_message(
-                "❌ Transfer failed! Please try again.",
+                f"❌ Transfer failed: {result.get('error', 'Unknown error')}",
                 ephemeral=True
             )
             return
+
+        # Log transfer (using result data)
+        economy_after = await db.get_server_economy() # Refetch or use result budget
         
-        # Add to recipient (net of tax)
-        await db.update_user_balance(
-            user.id,
-            net_amount,
-            TransactionType.TRANSFER_IN,
-            description=f"Transfer from {interaction.user.display_name}",
-            related_user_id=interaction.user.id
-        )
+        # Use values from result
+        before = result["sender_before"]
+        after = result["sender_after"]
+        recipient_before = result["recipient_before"]
+        recipient_after = result["recipient_after"]
         
-        # Add tax to server budget
-        if tax_amount > 0:
-            await db.add_taxes_collected(tax_amount)
-        
-        # Log transfer
-        recipient = await db.get_or_create_user(user.id)
-        economy_after = await db.get_server_economy()
         await economy_logger.log_transfer(
             sender_id=interaction.user.id,
             sender_name=interaction.user.display_name,
             receiver_id=user.id,
             receiver_name=user.display_name,
             amount=amount,
-            tax=tax_amount,
+            tax=tax_amount, # calculated earlier, verified in result
             sender_before=before,
             sender_after=after,
-            receiver_before=recipient.balance - net_amount,
-            receiver_after=recipient.balance,
-            budget_before=economy.total_budget,
-            budget_after=economy_after.total_budget,
+            receiver_before=recipient_before,
+            receiver_after=recipient_after,
+            budget_before=result["budget_before"],
+            budget_after=result["budget_after"],
             source="Pay Command"
         )
         

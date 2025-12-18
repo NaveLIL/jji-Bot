@@ -9,7 +9,8 @@ import discord
 from discord import app_commands
 
 from src.services.cache import cache
-from src.services.database import db
+# Use local import for db to avoid circular dependency
+# from src.services.database import db
 from src.utils.metrics import metrics
 
 
@@ -38,6 +39,8 @@ async def check_rate_limit(
     Check rate limit for a user action.
     Returns (is_allowed, remaining_count)
     """
+    from src.services.database import db
+
     # Try Redis first
     allowed, remaining = await cache.check_rate_limit(
         user_id, action, limit, window_seconds
@@ -75,6 +78,8 @@ async def check_user_allowed(user_id: int) -> Tuple[bool, Optional[str]]:
     Check if user is allowed to use bot.
     Returns (is_allowed, reason_if_not)
     """
+    from src.services.database import db
+
     # Check Redis blacklist first
     is_blacklisted, reason = await cache.is_blacklisted(user_id)
     if is_blacklisted:
@@ -175,6 +180,8 @@ async def check_suspicious_activity(
     Check for suspicious activity patterns.
     Returns (is_suspicious, reason)
     """
+    from src.services.database import db
+
     # Check transaction frequency
     tx_count = await db.get_action_count(user_id, "transaction", minutes=60)
     
@@ -202,6 +209,8 @@ async def handle_exploit_attempt(
     auto_kick: bool = True
 ) -> None:
     """Handle a detected exploit attempt"""
+    from src.services.database import db
+
     await db.log_security_event(
         user_id,
         f"exploit_{exploit_type}",
