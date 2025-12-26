@@ -1,20 +1,23 @@
 """
 Blackjack Game Engine
 Full-featured with 6-deck shoe, splits, doubles, insurance, surrender
+Optimized for stability and PvP state management.
 """
 
 import random
 import json
-from dataclasses import dataclass, field, asdict
-from typing import List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple, Dict, Any
 from enum import Enum
 
+# --- Helper Functions (Mocked if src.utils.helpers is missing, but assuming you have them) ---
+# If you actually need these implemented in this file, let me know. 
+# For now, I assume they import correctly as per your original file.
 from src.utils.helpers import (
-    CARD_SUITS, CARD_RANKS, CARD_VALUES,
+    CARD_SUITS, CARD_RANKS,
     calculate_hand_value, is_soft_hand, is_blackjack,
     can_split, can_double, format_hand
 )
-
 
 class GameState(str, Enum):
     """Blackjack game states"""
@@ -27,7 +30,6 @@ class GameState(str, Enum):
     WAITING = "waiting" # Waiting for opponent
     PLAYER_A_TURN = "player_a_turn"
     PLAYER_B_TURN = "player_b_turn"
-    RESOLVING = "resolving"
 
 
 class HandResult(str, Enum):
@@ -112,7 +114,7 @@ class Hand:
     
     @classmethod
     def from_dict(cls, data: dict) -> "Hand":
-        hand = cls(
+        return cls(
             cards=[Card.from_dict(c) for c in data["cards"]],
             bet=data["bet"],
             is_doubled=data.get("is_doubled", False),
@@ -121,10 +123,8 @@ class Hand:
             is_surrendered=data.get("is_surrendered", False),
             insurance_bet=data.get("insurance_bet", 0.0)
         )
-        return hand
     
     def format_display(self, hide_first: bool = False) -> str:
-        """Format hand for Discord display"""
         if hide_first and len(self.cards) > 1:
             return f"[🂠] {format_hand([c.to_dict() for c in self.cards[1:]])}"
         return format_hand([c.to_dict() for c in self.cards])
@@ -152,23 +152,22 @@ class Shoe:
         self.dealt_count = 0
     
     def needs_shuffle(self) -> bool:
-        """Check if shoe needs reshuffling based on penetration"""
         total_cards = self.deck_count * 52
+        if total_cards == 0: return True
         dealt_ratio = self.dealt_count / total_cards
         return dealt_ratio >= self.penetration
     
     def draw(self) -> Card:
-        """Draw a card from the shoe"""
+        """Draw a card from the shoe with safety checks"""
         if not self.cards or self.needs_shuffle():
             self._shuffle()
         
+        if not self.cards: # Should be impossible unless deck_count=0
+            self._shuffle()
+            
         card = self.cards.pop()
         self.dealt_count += 1
         return card
-    
-    def remaining(self) -> int:
-        """Get remaining cards in shoe"""
-        return len(self.cards)
     
     def to_dict(self) -> dict:
         return {
@@ -191,7 +190,7 @@ class Shoe:
 
 @dataclass
 class BlackjackGame:
-    """Complete blackjack game state"""
+    """Single Player Blackjack Game"""
     user_id: int
     bet: float
     shoe: Shoe
@@ -200,16 +199,18 @@ class BlackjackGame:
     current_hand_index: int = 0
     state: GameState = GameState.BETTING
     results: List[Tuple[HandResult, float]] = field(default_factory=list)
-    message_id: Optional[int] = None
-    channel_id: Optional[int] = None
     
-    # Game settings
+    # Settings
     dealer_stands_soft_17: bool = True
     blackjack_payout: float = 1.5
     insurance_payout: float = 2.0
     max_splits: int = 3
     allow_ace_resplit: bool = False
     allow_surrender: bool = True
+    
+    # Metadata
+    message_id: Optional[int] = None
+    channel_id: Optional[int] = None
     
     @property
     def current_hand(self) -> Optional[Hand]:
@@ -218,35 +219,19 @@ class BlackjackGame:
         return None
     
     @property
-    def total_bet(self) -> float:
-        """Calculate total amount bet including splits and doubles"""
-        total = 0.0
-        for hand in self.player_hands:
-            total += hand.bet
-            if hand.is_doubled:
-                total += hand.bet  # Double adds another bet
-            total += hand.insurance_bet
-        return total
-    
-    @property
     def is_complete(self) -> bool:
         return self.state == GameState.COMPLETE
-    
+
     @property
     def can_take_insurance(self) -> bool:
-        """Check if insurance is available"""
-        if self.state != GameState.INSURANCE_OFFERED:
-            return False
-        if len(self.dealer_hand.cards) < 1:
-            return False
+        if self.state != GameState.INSURANCE_OFFERED: return False
+        if len(self.dealer_hand.cards) < 1: return False
         return self.dealer_hand.cards[0].rank == "A"
-    
+
     def deal_initial(self) -> None:
-        """Deal initial cards"""
-        # Create player's first hand
         player_hand = Hand(bet=self.bet)
         
-        # Deal: Player, Dealer, Player, Dealer
+        # Deal: P, D, P, D
         player_hand.add_card(self.shoe.draw())
         self.dealer_hand.add_card(self.shoe.draw())
         player_hand.add_card(self.shoe.draw())
@@ -254,65 +239,48 @@ class BlackjackGame:
         
         self.player_hands = [player_hand]
         
-        # Check for dealer Ace (insurance opportunity)
         if self.dealer_hand.cards[0].rank == "A":
             self.state = GameState.INSURANCE_OFFERED
         else:
             self._check_initial_blackjacks()
-    
+            
     def _check_initial_blackjacks(self) -> None:
-        """Check for initial blackjacks and set game state"""
         player_bj = self.player_hands[0].is_blackjack
         dealer_bj = self.dealer_hand.is_blackjack
         
         if player_bj or dealer_bj:
             self.state = GameState.COMPLETE
-            
             if player_bj and dealer_bj:
                 self.results = [(HandResult.PUSH, 0)]
             elif player_bj:
-                winnings = self.bet * self.blackjack_payout
-                self.results = [(HandResult.BLACKJACK, winnings)]
+                self.results = [(HandResult.BLACKJACK, self.bet * self.blackjack_payout)]
             else:
                 self.results = [(HandResult.LOSE, -self.bet)]
         else:
             self.state = GameState.PLAYER_TURN
-    
+
     def take_insurance(self, accept: bool) -> None:
-        """Handle insurance decision"""
-        if not self.can_take_insurance:
-            return
+        if not self.can_take_insurance: return
         
         insurance_cost = self.bet / 2
         if accept:
-            # Insurance costs half the bet
             self.player_hands[0].insurance_bet = insurance_cost
         
-        # Check for dealer blackjack
         if self.dealer_hand.is_blackjack:
             self.state = GameState.COMPLETE
-            
-            # Insurance pays 2:1 if dealer has blackjack (you get back 2x your insurance bet)
-            insurance_winnings = insurance_cost * self.insurance_payout if accept else 0
+            insurance_win = insurance_cost * self.insurance_payout if accept else 0
             
             if self.player_hands[0].is_blackjack:
-                # Push on main bet (get bet back), plus insurance winnings
-                # Net result = insurance winnings only (main bet is returned separately)
-                self.results = [(HandResult.PUSH, insurance_winnings)]
+                # Push main, win insurance
+                self.results = [(HandResult.PUSH, insurance_win)]
             else:
-                # Lose main bet (-bet), insurance pays (+insurance_winnings)
-                # Insurance cost is already deducted, so net = winnings - main_bet
-                # If insurance taken: net = insurance_winnings - bet (insurance cost already paid)
-                # If not taken: net = -bet
-                net = insurance_winnings - self.bet
-                self.results = [(HandResult.LOSE, net)]
+                # Lose main, win insurance
+                self.results = [(HandResult.LOSE, insurance_win - self.bet)]
         else:
-            # No dealer blackjack, insurance loses if taken (cost already deducted)
-            # Just continue with normal play
+            # Insurance lost (cost remains in hand.insurance_bet), game continues
             self._check_initial_blackjacks()
-    
-    def hit(self) -> Tuple[bool, Card]:
-        """Hit current hand. Returns (is_bust, card_drawn)"""
+
+    def hit(self) -> Tuple[bool, Optional[Card]]:
         if self.state != GameState.PLAYER_TURN or not self.current_hand:
             return False, None
         
@@ -320,262 +288,126 @@ class BlackjackGame:
         self.current_hand.add_card(card)
         
         if self.current_hand.is_bust:
-            self._advance_to_next_hand()
+            self._advance_hand()
             return True, card
-        
+            
         return False, card
-    
+
     def stand(self) -> None:
-        """Stand on current hand"""
-        if self.state != GameState.PLAYER_TURN or not self.current_hand:
-            return
-        
+        if self.state != GameState.PLAYER_TURN or not self.current_hand: return
         self.current_hand.is_stood = True
-        self._advance_to_next_hand()
-    
+        self._advance_hand()
+
     def double_down(self) -> Tuple[bool, Optional[Card]]:
-        """Double down on current hand. Returns (success, card_drawn)"""
-        if self.state != GameState.PLAYER_TURN or not self.current_hand:
-            return False, None
-        
-        if not self.current_hand.can_double:
-            return False, None
+        if self.state != GameState.PLAYER_TURN or not self.current_hand: return False, None
+        if not self.current_hand.can_double: return False, None
         
         self.current_hand.is_doubled = True
         card = self.shoe.draw()
         self.current_hand.add_card(card)
-        
-        # After double, automatically stand
         self.current_hand.is_stood = True
-        self._advance_to_next_hand()
-        
+        self._advance_hand()
         return True, card
-    
+
     def split(self) -> bool:
-        """Split current hand. Returns success."""
-        if self.state != GameState.PLAYER_TURN or not self.current_hand:
-            return False
+        if self.state != GameState.PLAYER_TURN or not self.current_hand: return False
+        if not self.current_hand.can_split: return False
         
-        if not self.current_hand.can_split:
-            return False
-        
-        # Check max splits
         split_count = sum(1 for h in self.player_hands if h.is_split)
-        if split_count >= self.max_splits:
-            return False
+        if split_count >= self.max_splits: return False
         
-        # Check ace resplit
         if self.current_hand.is_pair_of_aces and not self.allow_ace_resplit:
             if any(h.is_split and h.cards[0].rank == "A" for h in self.player_hands):
                 return False
-        
-        # Perform split
+
         original = self.current_hand
-        card = original.cards.pop()  # Remove second card
+        card_moved = original.cards.pop()
         
-        # Create new hand
         new_hand = Hand(bet=original.bet, is_split=True)
-        new_hand.add_card(card)
-        
+        new_hand.add_card(card_moved)
         original.is_split = True
         
-        # Deal new cards to each hand
         original.add_card(self.shoe.draw())
         new_hand.add_card(self.shoe.draw())
         
-        # Insert new hand after current
         self.player_hands.insert(self.current_hand_index + 1, new_hand)
         
-        # For split aces, only one card each and auto-stand
-        if card.rank == "A":
+        # Split Aces Logic: One card only, then auto-stand
+        if card_moved.rank == "A":
             original.is_stood = True
             new_hand.is_stood = True
-            self._advance_to_next_hand()
-        
+            self._advance_hand()
+            
         return True
-    
+
     def surrender(self) -> bool:
-        """Surrender current hand. Returns success."""
-        if self.state != GameState.PLAYER_TURN:
-            return False
-        
-        if not self.allow_surrender:
-            return False
-        
-        # Can only surrender on initial hand (2 cards, no splits)
-        if len(self.player_hands) != 1 or len(self.player_hands[0].cards) != 2:
-            return False
+        if self.state != GameState.PLAYER_TURN: return False
+        if not self.allow_surrender: return False
+        if len(self.player_hands) != 1 or len(self.player_hands[0].cards) != 2: return False
         
         self.current_hand.is_surrendered = True
         self.state = GameState.COMPLETE
-        
-        # Surrender loses half bet
         self.results = [(HandResult.SURRENDER, -self.bet / 2)]
         return True
-    
-    def _advance_to_next_hand(self) -> None:
-        """Move to next hand or dealer turn"""
-        # Find next playable hand
+
+    def _advance_hand(self) -> None:
+        # Try to find next playable hand
         for i in range(self.current_hand_index + 1, len(self.player_hands)):
             hand = self.player_hands[i]
             if not hand.is_stood and not hand.is_bust:
                 self.current_hand_index = i
                 return
         
-        # No more player hands, check if all busted
-        all_bust = all(h.is_bust or h.is_surrendered for h in self.player_hands)
-        
-        if all_bust:
-            self.state = GameState.COMPLETE
-            self._calculate_results()
-        else:
-            self.state = GameState.DEALER_TURN
-            self._play_dealer()
-    
+        # No more hands, dealer's turn
+        self.state = GameState.DEALER_TURN
+        self._play_dealer()
+
     def _play_dealer(self) -> None:
-        """Play out dealer's hand"""
-        while True:
-            value = self.dealer_hand.value
-            is_soft = self.dealer_hand.is_soft
-            
-            # Dealer stands on 17+ (or soft 17 based on rules)
-            if value > 17:
-                break
-            if value == 17:
-                if not is_soft or self.dealer_stands_soft_17:
-                    break
-            
-            self.dealer_hand.add_card(self.shoe.draw())
+        # If all player hands busted/surrendered, dealer doesn't need to draw
+        active_hands = [h for h in self.player_hands if not h.is_bust and not h.is_surrendered]
+        
+        if active_hands:
+            while True:
+                val = self.dealer_hand.value
+                is_soft = self.dealer_hand.is_soft
+                if val > 17: break
+                if val == 17:
+                    if not is_soft or self.dealer_stands_soft_17: break
+                
+                # Safety valve for infinite loops
+                if len(self.dealer_hand.cards) > 12: break 
+                self.dealer_hand.add_card(self.shoe.draw())
         
         self.state = GameState.COMPLETE
         self._calculate_results()
-    
+
     def _calculate_results(self) -> None:
-        """Calculate final results for all hands"""
         self.results = []
-        dealer_value = self.dealer_hand.value
+        dealer_val = self.dealer_hand.value
         dealer_bust = self.dealer_hand.is_bust
         
         for hand in self.player_hands:
             if hand.is_surrendered:
                 self.results.append((HandResult.SURRENDER, -hand.bet / 2))
                 continue
-            
             if hand.is_bust:
                 loss = hand.bet * 2 if hand.is_doubled else hand.bet
                 self.results.append((HandResult.BUST, -loss))
                 continue
-            
-            player_value = hand.value
+                
             multiplier = 2 if hand.is_doubled else 1
+            hand_val = hand.value
             
             if dealer_bust:
                 self.results.append((HandResult.WIN, hand.bet * multiplier))
-            elif player_value > dealer_value:
+            elif hand_val > dealer_val:
                 self.results.append((HandResult.WIN, hand.bet * multiplier))
-            elif player_value < dealer_value:
+            elif hand_val < dealer_val:
                 self.results.append((HandResult.LOSE, -hand.bet * multiplier))
             else:
                 self.results.append((HandResult.PUSH, 0))
-    
-    def get_net_result(self) -> float:
-        """Get total net result (winnings - losses - insurance)"""
-        total = sum(r[1] for r in self.results)
-        
-        # Subtract insurance bets if no payout
-        for hand in self.player_hands:
-            if hand.insurance_bet > 0:
-                # Insurance only pays on dealer BJ, which is handled earlier
-                if not self.dealer_hand.is_blackjack:
-                    total -= hand.insurance_bet
-        
-        return total
-    
-    def get_available_actions(self) -> List[str]:
-        """Get list of available actions for current state"""
-        actions = []
-        
-        if self.state == GameState.INSURANCE_OFFERED:
-            return ["insurance_yes", "insurance_no"]
-        
-        if self.state != GameState.PLAYER_TURN or not self.current_hand:
-            return actions
-        
-        actions.extend(["hit", "stand"])
-        
-        if self.current_hand.can_double:
-            actions.append("double")
-        
-        if self.current_hand.can_split:
-            split_count = sum(1 for h in self.player_hands if h.is_split)
-            if split_count < self.max_splits:
-                actions.append("split")
-        
-        if self.allow_surrender and len(self.player_hands) == 1 and len(self.current_hand.cards) == 2:
-            actions.append("surrender")
-        
-        return actions
-    
-    def get_display_embed_data(self) -> dict:
-        """Get data for Discord embed display"""
-        dealer_hidden = self.state in [GameState.PLAYER_TURN, GameState.INSURANCE_OFFERED]
-        
-        # Format dealer hand
-        dealer_cards_raw = [f"{c.rank}{c.suit}" for c in self.dealer_hand.cards]
-        if dealer_hidden:
-            dealer_display = self.dealer_hand.format_display(hide_first=True)
-            dealer_value = "?"
-        else:
-            dealer_display = self.dealer_hand.format_display()
-            dealer_value = str(self.dealer_hand.value)
-            if self.dealer_hand.is_bust:
-                dealer_value = "BUST"
-        
-        # Format player hands
-        hands_display = []
-        for i, hand in enumerate(self.player_hands):
-            prefix = "➡️ " if i == self.current_hand_index and self.state == GameState.PLAYER_TURN else ""
-            value = hand.value
-            value_str = "BUST" if hand.is_bust else str(value)
-            
-            if hand.is_soft and value <= 21:
-                value_str = f"{value} (soft)"
-            
-            bet_info = f"${hand.bet:.0f}"
-            bet_amount = hand.bet
-            if hand.is_doubled:
-                bet_info = f"${hand.bet * 2:.0f} (doubled)"
-                bet_amount = hand.bet * 2
-            
-            cards_raw = [f"{c.rank}{c.suit}" for c in hand.cards]
-            
-            hands_display.append({
-                "prefix": prefix,
-                "cards": hand.format_display(),
-                "cards_list": cards_raw,
-                "value": value_str,
-                "value_numeric": value,
-                "bet": bet_info,
-                "bet_amount": bet_amount,
-                "is_current": i == self.current_hand_index,
-                "is_split": hand.is_split,
-                "is_bust": hand.is_bust,
-                "is_blackjack": hand.is_blackjack
-            })
-        
-        return {
-            "dealer_cards": dealer_display,
-            "dealer_cards_list": dealer_cards_raw,
-            "dealer_value": dealer_value,
-            "player_hands": hands_display,
-            "state": self.state.value,
-            "actions": self.get_available_actions(),
-            "results": [(r[0].value, r[1]) for r in self.results] if self.results else None,
-            "net_result": self.get_net_result() if self.is_complete else None
-        }
-    
+
     def to_dict(self) -> dict:
-        """Serialize game state to dictionary"""
         return {
             "user_id": self.user_id,
             "bet": self.bet,
@@ -587,6 +419,7 @@ class BlackjackGame:
             "results": [(r[0].value, r[1]) for r in self.results],
             "message_id": self.message_id,
             "channel_id": self.channel_id,
+            # Settings
             "dealer_stands_soft_17": self.dealer_stands_soft_17,
             "blackjack_payout": self.blackjack_payout,
             "insurance_payout": self.insurance_payout,
@@ -594,14 +427,19 @@ class BlackjackGame:
             "allow_ace_resplit": self.allow_ace_resplit,
             "allow_surrender": self.allow_surrender
         }
-    
+
     @classmethod
     def from_dict(cls, data: dict) -> "BlackjackGame":
-        """Deserialize game state from dictionary"""
         game = cls(
             user_id=data["user_id"],
             bet=data["bet"],
-            shoe=Shoe.from_dict(data["shoe"])
+            shoe=Shoe.from_dict(data["shoe"]),
+            dealer_stands_soft_17=data.get("dealer_stands_soft_17", True),
+            blackjack_payout=data.get("blackjack_payout", 1.5),
+            insurance_payout=data.get("insurance_payout", 2.0),
+            max_splits=data.get("max_splits", 3),
+            allow_ace_resplit=data.get("allow_ace_resplit", False),
+            allow_surrender=data.get("allow_surrender", True)
         )
         game.player_hands = [Hand.from_dict(h) for h in data["player_hands"]]
         game.dealer_hand = Hand.from_dict(data["dealer_hand"])
@@ -610,53 +448,16 @@ class BlackjackGame:
         game.results = [(HandResult(r[0]), r[1]) for r in data.get("results", [])]
         game.message_id = data.get("message_id")
         game.channel_id = data.get("channel_id")
-        game.dealer_stands_soft_17 = data.get("dealer_stands_soft_17", True)
-        game.blackjack_payout = data.get("blackjack_payout", 1.5)
-        game.insurance_payout = data.get("insurance_payout", 2.0)
-        game.max_splits = data.get("max_splits", 3)
-        game.allow_ace_resplit = data.get("allow_ace_resplit", False)
-        game.allow_surrender = data.get("allow_surrender", True)
         return game
-    
-    def to_json(self) -> str:
-        """Serialize to JSON string"""
-        return json.dumps(self.to_dict())
-    
-    @classmethod
-    def from_json(cls, json_str: str) -> "BlackjackGame":
-        """Deserialize from JSON string"""
-        return cls.from_dict(json.loads(json_str))
-
-
-def create_blackjack_game(
-    user_id: int,
-    bet: float,
-    deck_count: int = 6,
-    penetration: float = 0.75,
-    **settings
-) -> BlackjackGame:
-    """Create a new blackjack game"""
-    shoe = Shoe(deck_count=deck_count, penetration=penetration)
-    
-    game = BlackjackGame(
-        user_id=user_id,
-        bet=bet,
-        shoe=shoe,
-        dealer_stands_soft_17=settings.get("dealer_stands_soft_17", True),
-        blackjack_payout=settings.get("blackjack_payout", 1.5),
-        insurance_payout=settings.get("insurance_payout", 2.0),
-        max_splits=settings.get("max_splits", 3),
-        allow_ace_resplit=settings.get("allow_ace_resplit", False),
-        allow_surrender=settings.get("allow_surrender", True)
-    )
-    
-    game.deal_initial()
-    return game
 
 
 @dataclass
 class PvPBlackjackGame:
-    """PvP Blackjack game engine (Player A vs Player B vs Dealer)"""
+    """Improved PvP Blackjack engine.
+
+    Fixes queue hangups and provides a Discord-friendly UI payload generator.
+    """
+
     player_a_id: int
     player_b_id: int
     player_a_bet: float
@@ -666,34 +467,32 @@ class PvPBlackjackGame:
     # State
     state: GameState = GameState.WAITING
 
-    # Hands (List of Hand to support splits in future, but for now assuming 1 hand per player for simplicity or full implementation?)
-    # The requirement asks for standard casino rules which include splits.
-    # We need to track multiple hands per player.
+    # Hands (lists because hands can be split)
     player_a_hands: List[Hand] = field(default_factory=list)
     player_b_hands: List[Hand] = field(default_factory=list)
     dealer_hand: Hand = field(default_factory=Hand)
 
+    # Indexes for the currently played hand
     current_hand_index_a: int = 0
     current_hand_index_b: int = 0
 
-    # Results: Map player_id -> List[(HandResult, payout)]
-    results: dict = field(default_factory=dict)
+    # Results mapping: player_id -> list of (HandResult, amount)
+    results: Dict[int, List[Tuple[HandResult, float]]] = field(default_factory=dict)
 
     # Settings
     dealer_stands_soft_17: bool = True
     blackjack_payout: float = 1.5
 
-    # Metadata
+    # Discord metadata
     message_id: Optional[int] = None
     channel_id: Optional[int] = None
 
     def deal_initial(self) -> None:
-        """Deal initial cards for PvP"""
-        # Create initial hands
+        """Deal initial cards and check for immediate dealer blackjack."""
         hand_a = Hand(bet=self.player_a_bet)
         hand_b = Hand(bet=self.player_b_bet)
 
-        # Deal: A, B, Dealer, A, B, Dealer
+        # Deal order: A, B, Dealer, A, B, Dealer
         hand_a.add_card(self.shoe.draw())
         hand_b.add_card(self.shoe.draw())
         self.dealer_hand.add_card(self.shoe.draw())
@@ -705,53 +504,38 @@ class PvPBlackjackGame:
         self.player_a_hands = [hand_a]
         self.player_b_hands = [hand_b]
 
-        # Check instant blackjacks
-        bj_a = hand_a.is_blackjack
-        bj_b = hand_b.is_blackjack
-        dealer_bj = self.dealer_hand.is_blackjack
-
-        # In casino play, players play their hands first regardless of dealer BJ (except for insurance, which we might skip for simplicity in PvP first pass or implement)
-        # Standard: Check dealer BJ immediately.
-
-        # Simplification: If dealer has BJ, game ends immediately.
-        if dealer_bj:
+        # If dealer has blackjack the round ends immediately
+        if self.dealer_hand.is_blackjack:
             self.state = GameState.COMPLETE
             self._resolve_results()
         else:
+            # Start with Player A and immediately advance state
             self.state = GameState.PLAYER_A_TURN
-
-            # Auto-skip if A has BJ
-            if bj_a:
-                self.state = GameState.PLAYER_B_TURN
-                if bj_b:
-                    self.state = GameState.DEALER_TURN # Dealer still plays to see if they get 21? No, dealer played.
-                    # Actually if dealer has no BJ, and Players have BJ, Players win 3:2.
-                    # Dealer turn is only needed if someone doesn't have BJ or bust.
-                    self._play_dealer()
+            self._update_game_state()
 
     @property
     def current_turn_player_id(self) -> Optional[int]:
+        """Return the discord id of the player whose turn it is now."""
         if self.state == GameState.PLAYER_A_TURN:
             return self.player_a_id
-        elif self.state == GameState.PLAYER_B_TURN:
+        if self.state == GameState.PLAYER_B_TURN:
             return self.player_b_id
         return None
 
     @property
     def current_active_hand(self) -> Optional[Hand]:
+        """Return the Hand object currently awaiting player input."""
         if self.state == GameState.PLAYER_A_TURN:
-             if 0 <= self.current_hand_index_a < len(self.player_a_hands):
-                 return self.player_a_hands[self.current_hand_index_a]
-        elif self.state == GameState.PLAYER_B_TURN:
-             if 0 <= self.current_hand_index_b < len(self.player_b_hands):
-                 return self.player_b_hands[self.current_hand_index_b]
+            if 0 <= self.current_hand_index_a < len(self.player_a_hands):
+                return self.player_a_hands[self.current_hand_index_a]
+        if self.state == GameState.PLAYER_B_TURN:
+            if 0 <= self.current_hand_index_b < len(self.player_b_hands):
+                return self.player_b_hands[self.current_hand_index_b]
         return None
 
     def hit(self, user_id: int) -> Tuple[bool, Optional[Card]]:
-        """Player hits. Returns (is_bust, card)"""
         if user_id != self.current_turn_player_id:
             return False, None
-
         hand = self.current_active_hand
         if not hand:
             return False, None
@@ -759,169 +543,312 @@ class PvPBlackjackGame:
         card = self.shoe.draw()
         hand.add_card(card)
 
+        # If bust, advance the state immediately
         if hand.is_bust:
-            self._advance_turn(user_id)
+            self._update_game_state()
             return True, card
+
+        # Auto-stand on 21 for smoother UI
+        if hand.value == 21:
+            hand.is_stood = True
+            self._update_game_state()
 
         return False, card
 
     def stand(self, user_id: int) -> bool:
-        """Player stands."""
         if user_id != self.current_turn_player_id:
             return False
-
         hand = self.current_active_hand
         if not hand:
             return False
 
         hand.is_stood = True
-        self._advance_turn(user_id)
+        self._update_game_state()
         return True
 
     def double(self, user_id: int) -> Tuple[bool, Optional[Card]]:
-        """Player doubles."""
         if user_id != self.current_turn_player_id:
             return False, None
-
         hand = self.current_active_hand
         if not hand or not hand.can_double:
             return False, None
 
         hand.is_doubled = True
-        # Note: In a real system we'd need to deduct balance here.
-        # But this class is pure logic. The caller must handle balance updates.
-        # However, for PvP, the money is locked. We assume 'bet' is just tracking.
-        # Caller needs to verify funds for the extra bet.
-
         card = self.shoe.draw()
         hand.add_card(card)
         hand.is_stood = True
-        self._advance_turn(user_id)
+        self._update_game_state()
         return True, card
 
     def split(self, user_id: int) -> bool:
-        """Player splits."""
         if user_id != self.current_turn_player_id:
             return False
-
         hand = self.current_active_hand
         if not hand or not hand.can_split:
             return False
 
-        # Perform split
         original = hand
-        card_to_move = original.cards.pop()
+        card_moved = original.cards.pop()
 
         new_hand = Hand(bet=original.bet, is_split=True)
-        new_hand.add_card(card_to_move)
+        new_hand.add_card(card_moved)
         original.is_split = True
 
-        # Deal new cards
         original.add_card(self.shoe.draw())
         new_hand.add_card(self.shoe.draw())
 
-        # Add to hands list
+        is_aces = (card_moved.rank == "A")
+
         if user_id == self.player_a_id:
             self.player_a_hands.insert(self.current_hand_index_a + 1, new_hand)
-             # Ace split rules: 1 card only? Implementing standard for now (can hit)
-             # Unless Ace
-            if card_to_move.rank == "A":
+            if is_aces:
                 original.is_stood = True
                 new_hand.is_stood = True
-                self._advance_turn(user_id) # Advance past original
-                # Wait, if we insert, we still need to process them.
-                # If aces, we stand on both.
-                # Logic to advance through both aces needed.
         else:
             self.player_b_hands.insert(self.current_hand_index_b + 1, new_hand)
-            if card_to_move.rank == "A":
+            if is_aces:
                 original.is_stood = True
                 new_hand.is_stood = True
-                self._advance_turn(user_id)
 
+        self._update_game_state()
         return True
 
-    def _advance_turn(self, user_id: int) -> None:
-        """Advance to next hand or next player"""
-        if user_id == self.player_a_id:
-            # Check next hand for A
-            for i in range(self.current_hand_index_a + 1, len(self.player_a_hands)):
-                if not self.player_a_hands[i].is_stood and not self.player_a_hands[i].is_bust:
-                    self.current_hand_index_a = i
-                    return
-            # A is done, move to B
+    def _update_game_state(self) -> None:
+        """Main queue-checking loop. Finds the next playable hand and sets the state."""
+        if self.state == GameState.COMPLETE:
+            return
+
+        # 1) Check Player A
+        idx_a, done_a = self._find_next_playable(self.player_a_hands, self.current_hand_index_a)
+        if not done_a:
+            self.state = GameState.PLAYER_A_TURN
+            self.current_hand_index_a = idx_a
+            return
+
+        # 2) Check Player B
+        idx_b, done_b = self._find_next_playable(self.player_b_hands, self.current_hand_index_b)
+        if not done_b:
             self.state = GameState.PLAYER_B_TURN
+            self.current_hand_index_b = idx_b
+            return
 
-            # If B has blackjack, skip B?
-            if any(h.is_blackjack for h in self.player_b_hands):
-                self._advance_turn(self.player_b_id)
+        # 3) Dealer's turn
+        self.state = GameState.DEALER_TURN
+        self._play_dealer()
 
-        elif user_id == self.player_b_id:
-            # Check next hand for B
-            for i in range(self.current_hand_index_b + 1, len(self.player_b_hands)):
-                if not self.player_b_hands[i].is_stood and not self.player_b_hands[i].is_bust:
-                    self.current_hand_index_b = i
-                    return
-            # B is done, move to Dealer
-            self.state = GameState.DEALER_TURN
-            self._play_dealer()
+    def _find_next_playable(self, hands: List[Hand], start_idx: int) -> Tuple[int, bool]:
+        """Find the next hand index that requires action. Returns (index, all_done_bool)."""
+        for i in range(start_idx, len(hands)):
+            h = hands[i]
+            if not h.is_bust and not h.is_stood and not h.is_blackjack:
+                return i, False
+        return len(hands) - 1, True
 
     def _play_dealer(self) -> None:
-        """Play dealer hand"""
-        # If all players busted, dealer doesn't need to play (Standard rule? Or does dealer play for table?)
-        # Standard: If all players bust, dealer wins without playing.
-        # But we need to record result.
+        # If both players have all busted, skip dealer draws
+        all_a_bust = all(h.is_bust for h in self.player_a_hands)
+        all_b_bust = all(h.is_bust for h in self.player_b_hands)
 
-        active_a = any(not h.is_bust for h in self.player_a_hands)
-        active_b = any(not h.is_bust for h in self.player_b_hands)
-
-        if active_a or active_b:
+        if not (all_a_bust and all_b_bust):
             while True:
                 val = self.dealer_hand.value
                 is_soft = self.dealer_hand.is_soft
+
                 if val > 17:
                     break
                 if val == 17:
                     if not is_soft or self.dealer_stands_soft_17:
                         break
+
+                if len(self.dealer_hand.cards) > 12:
+                    break
+
                 self.dealer_hand.add_card(self.shoe.draw())
 
         self.state = GameState.COMPLETE
         self._resolve_results()
 
     def _resolve_results(self) -> None:
-        """Calculate payouts"""
+        # PvP duel: compare hands head-to-head between Player A and Player B
+        # For matching hand indices, decide winner between players directly.
+        # For unmatched extra hands, fall back to comparing against dealer (legacy behaviour).
+
         dealer_val = self.dealer_hand.value
         dealer_bust = self.dealer_hand.is_bust
         dealer_bj = self.dealer_hand.is_blackjack
 
-        for pid, hands in [(self.player_a_id, self.player_a_hands), (self.player_b_id, self.player_b_hands)]:
-            player_results = []
-            for hand in hands:
-                val = hand.value
-                # Determine multiplier (double down)
-                bet_mult = 2.0 if hand.is_doubled else 1.0
-                bet_amt = hand.bet * bet_mult
+        def hand_base_bet(h: Hand) -> float:
+            return h.bet * (2.0 if h.is_doubled else 1.0)
 
-                if hand.is_bust:
-                    player_results.append((HandResult.BUST, -bet_amt))
-                elif hand.is_blackjack:
-                    if dealer_bj:
-                         player_results.append((HandResult.PUSH, 0))
-                    else:
-                         player_results.append((HandResult.BLACKJACK, bet_amt * self.blackjack_payout))
-                elif dealer_bj:
-                    player_results.append((HandResult.LOSE, -bet_amt))
-                elif dealer_bust:
-                    player_results.append((HandResult.WIN, bet_amt))
-                elif val > dealer_val:
-                    player_results.append((HandResult.WIN, bet_amt))
-                elif val < dealer_val:
-                    player_results.append((HandResult.LOSE, -bet_amt))
+        def compare_to_dealer(h: Hand):
+            # reuse previous single-player logic for fallback
+            if h.is_bust:
+                return (HandResult.BUST, -hand_base_bet(h))
+            if h.is_blackjack:
+                return (HandResult.PUSH, 0) if dealer_bj else (HandResult.BLACKJACK, hand_base_bet(h) * self.blackjack_payout)
+            if dealer_bj:
+                return (HandResult.LOSE, -hand_base_bet(h))
+            if dealer_bust:
+                return (HandResult.WIN, hand_base_bet(h))
+            if h.value > dealer_val:
+                return (HandResult.WIN, hand_base_bet(h))
+            if h.value < dealer_val:
+                return (HandResult.LOSE, -hand_base_bet(h))
+            return (HandResult.PUSH, 0)
+
+        a_results: List[Tuple[HandResult, float]] = []
+        b_results: List[Tuple[HandResult, float]] = []
+
+        max_hands = max(len(self.player_a_hands), len(self.player_b_hands))
+
+        for i in range(max_hands):
+            ha = self.player_a_hands[i] if i < len(self.player_a_hands) else None
+            hb = self.player_b_hands[i] if i < len(self.player_b_hands) else None
+
+            if ha and hb:
+                # Both have a hand at this index -> compare head-to-head
+                # Bust rules
+                if ha.is_bust and hb.is_bust:
+                    a_results.append((HandResult.BUST, -hand_base_bet(ha)))
+                    b_results.append((HandResult.BUST, -hand_base_bet(hb)))
+                    continue
+
+                if ha.is_bust and not hb.is_bust:
+                    a_results.append((HandResult.LOSE, -hand_base_bet(ha)))
+                    b_results.append((HandResult.WIN, hand_base_bet(hb)))
+                    continue
+
+                if hb.is_bust and not ha.is_bust:
+                    a_results.append((HandResult.WIN, hand_base_bet(ha)))
+                    b_results.append((HandResult.LOSE, -hand_base_bet(hb)))
+                    continue
+
+                # Blackjacks
+                if ha.is_blackjack and hb.is_blackjack:
+                    a_results.append((HandResult.PUSH, 0))
+                    b_results.append((HandResult.PUSH, 0))
+                    continue
+                if ha.is_blackjack and not hb.is_blackjack:
+                    a_results.append((HandResult.BLACKJACK, hand_base_bet(ha) * self.blackjack_payout))
+                    b_results.append((HandResult.LOSE, -hand_base_bet(hb)))
+                    continue
+                if hb.is_blackjack and not ha.is_blackjack:
+                    a_results.append((HandResult.LOSE, -hand_base_bet(ha)))
+                    b_results.append((HandResult.BLACKJACK, hand_base_bet(hb) * self.blackjack_payout))
+                    continue
+
+                # Regular comparison by value
+                if ha.value > hb.value:
+                    a_results.append((HandResult.WIN, hand_base_bet(ha)))
+                    b_results.append((HandResult.LOSE, -hand_base_bet(hb)))
+                elif ha.value < hb.value:
+                    a_results.append((HandResult.LOSE, -hand_base_bet(ha)))
+                    b_results.append((HandResult.WIN, hand_base_bet(hb)))
                 else:
-                    player_results.append((HandResult.PUSH, 0))
+                    a_results.append((HandResult.PUSH, 0))
+                    b_results.append((HandResult.PUSH, 0))
 
-            self.results[pid] = player_results
+            elif ha and not hb:
+                # Opponent has no corresponding hand -> compare this hand to dealer
+                a_results.append(compare_to_dealer(ha))
+
+            elif hb and not ha:
+                b_results.append(compare_to_dealer(hb))
+
+        self.results[self.player_a_id] = a_results
+        self.results[self.player_b_id] = b_results
+
+    # --- Discord-friendly visualization ---
+    def get_discord_payload(self, player_a_name: str, player_b_name: str) -> dict:
+        """Produce a ready-to-use payload for a Discord embed and available actions."""
+        is_game_over = (self.state == GameState.COMPLETE)
+        # Dealer display (hide hole card if game not over)
+        if is_game_over:
+            d_cards = " ".join(str(c) for c in self.dealer_hand.cards)
+            d_val = "BUST" if self.dealer_hand.is_bust else str(self.dealer_hand.value)
+            dealer_str = f"{d_cards}\nPoints: {d_val}"
+        else:
+            visible = self.dealer_hand.cards[1:]
+            d_cards = "?? " + " ".join(str(c) for c in visible)
+            dealer_str = f"{d_cards}\nPoints: ?"
+
+        def format_player_field(name: str, hands: List[Hand], current_idx: int, is_active_turn: bool, result_list=None) -> str:
+            lines = []
+            for i, hand in enumerate(hands):
+                label = f"Hand {i+1}:"
+                active_marker = " <— Your turn" if is_active_turn and i == current_idx and not is_game_over else ""
+
+                cards_str = " ".join(str(c) for c in hand.cards)
+                val_str = f"{hand.value}"
+                status_parts = []
+                if hand.is_bust:
+                    status_parts.append("BUST")
+                elif hand.is_blackjack:
+                    status_parts.append("BJ")
+                if hand.is_doubled:
+                    status_parts.append("x2")
+                if hand.is_surrendered:
+                    status_parts.append("Surrendered")
+
+                if is_game_over and result_list:
+                    res_type, amt = result_list[i]
+                    if res_type == HandResult.WIN or res_type == HandResult.BLACKJACK:
+                        status_parts.append(f"+${amt:.1f}")
+                    elif res_type == HandResult.LOSE or res_type == HandResult.BUST:
+                        status_parts.append(f"-${abs(amt):.1f}")
+                    elif res_type == HandResult.PUSH:
+                        status_parts.append("Push")
+
+                status = (" — " + ", ".join(status_parts)) if status_parts else ""
+                lines.append(f"{label} {cards_str} ({val_str}){status}{active_marker}")
+            return "\n".join(lines)
+
+        a_active = (self.state == GameState.PLAYER_A_TURN)
+        b_active = (self.state == GameState.PLAYER_B_TURN)
+        a_field = format_player_field(player_a_name, self.player_a_hands, self.current_hand_index_a, a_active, self.results.get(self.player_a_id))
+        b_field = format_player_field(player_b_name, self.player_b_hands, self.current_hand_index_b, b_active, self.results.get(self.player_b_id))
+
+        color = 0x2b2d31
+        if a_active:
+            color = 0x3498db
+        elif b_active:
+            color = 0xe91e63
+        elif is_game_over:
+            color = 0xf1c40f
+
+        status_text = "Game in progress"
+        if a_active:
+            status_text = f"{player_a_name}'s Turn"
+        elif b_active:
+            status_text = f"{player_b_name}'s Turn"
+        elif is_game_over:
+            status_text = "Game complete"
+
+        return {
+            "embed": {
+                "title": f"PvP Blackjack — {status_text}",
+                "color": color,
+                "fields": [
+                    {"name": "Dealer", "value": dealer_str, "inline": False},
+                    {"name": f"{player_a_name} (${self.player_a_bet})", "value": a_field or "—", "inline": False},
+                    {"name": f"{player_b_name} (${self.player_b_bet})", "value": b_field or "—", "inline": False},
+                ]
+            },
+            "actions": self.get_available_actions()
+        }
+
+    def get_available_actions(self) -> List[str]:
+        if self.state == GameState.COMPLETE or self.state == GameState.DEALER_TURN:
+            return []
+        hand = self.current_active_hand
+        if not hand:
+            return []
+        actions = ["hit", "stand"]
+        if hand.can_double:
+            actions.append("double")
+        if hand.can_split:
+            actions.append("split")
+        return actions
 
     def to_dict(self) -> dict:
         return {
@@ -936,37 +863,47 @@ class PvPBlackjackGame:
             "dealer_hand": self.dealer_hand.to_dict(),
             "current_hand_index_a": self.current_hand_index_a,
             "current_hand_index_b": self.current_hand_index_b,
-            "results": {
-                str(k): [(r[0].value, r[1]) for r in v]
-                for k, v in self.results.items()
-            },
+            "results": {str(k): [(r[0].value, r[1]) for r in v] for k, v in self.results.items()},
             "message_id": self.message_id,
-            "channel_id": self.channel_id
+            "channel_id": self.channel_id,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "PvPBlackjackGame":
-        shoe = Shoe.from_dict(data["shoe"])
         game = cls(
             player_a_id=data["player_a_id"],
             player_b_id=data["player_b_id"],
             player_a_bet=data["player_a_bet"],
             player_b_bet=data["player_b_bet"],
-            shoe=shoe
+            shoe=Shoe.from_dict(data["shoe"])
         )
         game.state = GameState(data["state"])
-        game.player_a_hands = [Hand.from_dict(h) for h in data["player_a_hands"]]
-        game.player_b_hands = [Hand.from_dict(h) for h in data["player_b_hands"]]
-        game.dealer_hand = Hand.from_dict(data["dealer_hand"])
-        game.current_hand_index_a = data["current_hand_index_a"]
-        game.current_hand_index_b = data["current_hand_index_b"]
-
-        raw_results = data.get("results", {})
-        game.results = {
-            int(k): [(HandResult(r[0]), r[1]) for r in v]
-            for k, v in raw_results.items()
-        }
-
+        game.player_a_hands = [Hand.from_dict(h) for h in data.get("player_a_hands", [])]
+        game.player_b_hands = [Hand.from_dict(h) for h in data.get("player_b_hands", [])]
+        game.dealer_hand = Hand.from_dict(data.get("dealer_hand", {"cards": [], "bet": 0}))
+        game.current_hand_index_a = data.get("current_hand_index_a", 0)
+        game.current_hand_index_b = data.get("current_hand_index_b", 0)
+        raw_res = data.get("results", {})
+        game.results = {int(k): [(HandResult(r[0]), r[1]) for r in v] for k, v in raw_res.items()}
         game.message_id = data.get("message_id")
         game.channel_id = data.get("channel_id")
         return game
+
+
+def create_blackjack_game(user_id: int, bet: float, deck_count: int = 6, **settings) -> BlackjackGame:
+    """Helper to create a single-player BlackjackGame with a fresh shoe and initial deal."""
+    shoe = Shoe(deck_count=deck_count)
+    game = BlackjackGame(
+        user_id=user_id,
+        bet=bet,
+        shoe=shoe,
+        dealer_stands_soft_17=settings.get("dealer_stands_soft_17", True),
+        blackjack_payout=settings.get("blackjack_payout", 1.5),
+        insurance_payout=settings.get("insurance_payout", 2.0),
+        max_splits=settings.get("max_splits", 3),
+        allow_ace_resplit=settings.get("allow_ace_resplit", False),
+        allow_surrender=settings.get("allow_surrender", True),
+    )
+    game.deal_initial()
+    return game
+ 

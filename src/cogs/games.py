@@ -11,6 +11,7 @@ from typing import Literal, Optional, Dict
 from datetime import datetime, timezone
 import random
 import json
+import os
 
 from src.services.database import db
 from src.services.cache import cache
@@ -39,24 +40,27 @@ def get_fancy_card_display(cards: list, hide_first: bool = False) -> str:
     for i, card in enumerate(cards):
         if i == 0 and hide_first:
             result.append("🂠")
+            continue
+
+        # Parse card string - last character is suit
+        suit = card[-1]
+        rank = card[:-1]
+
+        # Use simple emoji/symbols without markdown for clarity
+        if suit == "♥":
+            display = f"{rank}♥"
+        elif suit == "♦":
+            display = f"{rank}♦"
+        elif suit == "♠":
+            display = f"{rank}♠"
+        elif suit == "♣":
+            display = f"{rank}♣"
         else:
-            # Parse card string - last character is suit
-            suit = card[-1]
-            rank = card[:-1]
-            
-            # Use colored emoji hearts/diamonds for red, black for spades/clubs
-            if suit == "♥":
-                result.append(f"**{rank}**❤️")
-            elif suit == "♦":
-                result.append(f"**{rank}**♦️")
-            elif suit == "♠":
-                result.append(f"**{rank}**♠️")
-            elif suit == "♣":
-                result.append(f"**{rank}**♣️")
-            else:
-                result.append(f"**{rank}**{suit}")
-    
-    return " │ ".join(result)
+            display = f"{rank}{suit}"
+
+        result.append(display)
+
+    return " ".join(result)
 
 
 class PvPInviteView(discord.ui.View):
@@ -660,7 +664,9 @@ class PvPBlackjackView(discord.ui.View):
         self.clear_items()
         
         if self.pvp_game.state == GameState.COMPLETE:
-            # Maybe a close button or stats?
+            # Game finished — offer rematch and close controls
+            self.add_item(PlayAgainButton())
+            self.add_item(ClosePVPButton())
             return
         
         # Buttons for current turn player
@@ -695,47 +701,30 @@ class PvPBlackjackView(discord.ui.View):
 
         embed = discord.Embed(
             title="⚔️ PVP BLACKJACK DUEL",
-            description=f"```ansi\n\u001b[1;37m{status}\u001b[0m\n```",
+            description=status,
             color=color
         )
         
-        # Dealer
-        dealer_hand = self.pvp_game.dealer_hand
-        if self.pvp_game.state == GameState.COMPLETE:
-            dealer_val = dealer_hand.value
-            dealer_display = get_fancy_card_display([c.to_dict()["rank"]+c.to_dict()["suit"] for c in dealer_hand.cards], hide_first=False)
-            embed.add_field(name=f"🎩 DEALER — {dealer_val}", value=f"```\n{dealer_display}\n```", inline=False)
-        else:
-            dealer_display = get_fancy_card_display([c.to_dict()["rank"]+c.to_dict()["suit"] for c in dealer_hand.cards], hide_first=True)
-            embed.add_field(name="🎩 DEALER — ?", value=f"```\n{dealer_display}\n```", inline=False)
+        # Players: render hands in clear code blocks (dealer removed for PvP)
+        def render_player_block(hands, current_turn_state, current_index):
+            lines = []
+            for i, hand in enumerate(hands):
+                cards = [c.to_dict()["rank"]+c.to_dict()["suit"] for c in hand.cards]
+                val = hand.value
+                suffix = " BUST" if hand.is_bust else (" BJ!" if hand.is_blackjack else "")
+                pointer = " <- ACTIVE" if (current_turn_state and i == current_index) else ""
+                lines.append(f"Hand {i+1}: {get_fancy_card_display(cards)} ({val}){suffix}{pointer}")
+            return "```text\n" + "\n".join(lines) + "\n```"
 
-        # Player A
-        a_hands_display = []
-        for i, hand in enumerate(self.pvp_game.player_a_hands):
-            cards = [c.to_dict()["rank"]+c.to_dict()["suit"] for c in hand.cards]
-            val = hand.value
-            val_str = f"**{val}**"
-            if hand.is_bust: val_str = f"~~{val}~~ BUST"
-            elif hand.is_blackjack: val_str = f"**{val}** BJ!"
+        pa_name = getattr(self, "player_a_name", None)
+        pa_label = f"{pa_name} — <@{self.pvp_game.player_a_id}>" if pa_name else f"<@{self.pvp_game.player_a_id}>"
+        a_block = render_player_block(self.pvp_game.player_a_hands, self.pvp_game.state == GameState.PLAYER_A_TURN, self.pvp_game.current_hand_index_a)
+        embed.add_field(name=f"👤 Player A ({pa_label}) — Bet: {format_balance(self.pvp_game.player_a_bet)}", value=a_block, inline=False)
 
-            indicator = "👉" if self.pvp_game.state == GameState.PLAYER_A_TURN and i == self.pvp_game.current_hand_index_a else ""
-            a_hands_display.append(f"{indicator} Hand {i+1}: {get_fancy_card_display(cards)} ({val_str})")
-
-        embed.add_field(name=f"👤 Player A (<@{self.pvp_game.player_a_id}>) - ${self.pvp_game.player_a_bet}", value="\n".join(a_hands_display), inline=False)
-
-        # Player B
-        b_hands_display = []
-        for i, hand in enumerate(self.pvp_game.player_b_hands):
-            cards = [c.to_dict()["rank"]+c.to_dict()["suit"] for c in hand.cards]
-            val = hand.value
-            val_str = f"**{val}**"
-            if hand.is_bust: val_str = f"~~{val}~~ BUST"
-            elif hand.is_blackjack: val_str = f"**{val}** BJ!"
-
-            indicator = "👉" if self.pvp_game.state == GameState.PLAYER_B_TURN and i == self.pvp_game.current_hand_index_b else ""
-            b_hands_display.append(f"{indicator} Hand {i+1}: {get_fancy_card_display(cards)} ({val_str})")
-
-        embed.add_field(name=f"👤 Player B (<@{self.pvp_game.player_b_id}>) - ${self.pvp_game.player_b_bet}", value="\n".join(b_hands_display), inline=False)
+        pb_name = getattr(self, "player_b_name", None)
+        pb_label = f"{pb_name} — <@{self.pvp_game.player_b_id}>" if pb_name else f"<@{self.pvp_game.player_b_id}>"
+        b_block = render_player_block(self.pvp_game.player_b_hands, self.pvp_game.state == GameState.PLAYER_B_TURN, self.pvp_game.current_hand_index_b)
+        embed.add_field(name=f"👤 Player B ({pb_label}) — Bet: {format_balance(self.pvp_game.player_b_bet)}", value=b_block, inline=False)
         
         # Results
         if self.pvp_game.state == GameState.COMPLETE:
@@ -751,6 +740,10 @@ class PvPBlackjackView(discord.ui.View):
                 res_str += f"<@{self.pvp_game.player_b_id}>: {'+' if total_profit >= 0 else ''}{total_profit:.0f}\n"
 
             embed.add_field(name="📊 RESULTS", value=res_str, inline=False)
+
+        # Use cached display names when available to show readable names on all clients
+        # Footer: do not include test build tag in production embeds
+        embed.set_footer(text="Developed by NaveL for JJI in 2025")
 
         return embed
 
@@ -804,6 +797,61 @@ class PvPSplitButton(discord.ui.Button):
             await interaction.response.send_message("❌ Not your turn!", ephemeral=True)
             return
         await self.view.cog.process_pvp_action(self.view.game_id, "split", self.player_id, interaction)
+
+
+class PlayAgainButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Play Again", style=discord.ButtonStyle.primary, emoji="🔁")
+
+    async def callback(self, interaction: discord.Interaction):
+        # Allow either participant to request a rematch; start a fresh PvP game with same bet
+        view: PvPBlackjackView = self.view
+        if not view or not view.pvp_game:
+            await interaction.response.send_message("❌ Can't start rematch right now.", ephemeral=True)
+            return
+
+        p1 = view.pvp_game.player_a_id
+        p2 = view.pvp_game.player_b_id
+        bet = view.pvp_game.player_a_bet
+
+        # Only participants can start a rematch
+        if interaction.user.id not in (p1, p2):
+            await interaction.response.send_message("❌ Only participants can start a rematch.", ephemeral=True)
+            return
+
+        # Defer response so start_pvp_game can use followup sends
+        try:
+            await interaction.response.defer()
+        except Exception:
+            # If defer fails, try a simple acknowledgement
+            try:
+                await interaction.response.send_message("⏳ Starting rematch...", ephemeral=True)
+            except Exception:
+                pass
+
+        # Use cog helper to start a new PvP game; this will perform balance checks
+        await view.cog.start_pvp_game(interaction, p1, p2, bet)
+
+
+class ClosePVPButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="CLOSE", style=discord.ButtonStyle.secondary, emoji="❌")
+
+    async def callback(self, interaction: discord.Interaction):
+        view: PvPBlackjackView = self.view
+        if not view or not view.pvp_game:
+            await interaction.response.send_message("❌ Nothing to close.", ephemeral=True)
+            return
+
+        # Only participants can close the board
+        uid = interaction.user.id
+        if uid not in (view.pvp_game.player_a_id, view.pvp_game.player_b_id):
+            await interaction.response.send_message("❌ Only participants can close this game.", ephemeral=True)
+            return
+
+        embed = view.get_embed()
+        embed.set_footer(text="Game closed by player.")
+        await interaction.response.edit_message(embed=embed, view=None)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -955,8 +1003,30 @@ class GamesCog(commands.Cog):
         # 4. Show Board
         # Use short timeout for turn actions
         view = PvPBlackjackView(game_id, game, self, timeout=30)
+
+        # Try to cache readable display names on the view so embeds show friendly names
+        try:
+            guild = interaction.guild
+            if guild:
+                try:
+                    member_a = guild.get_member(p1_id) or await guild.fetch_member(p1_id)
+                except Exception:
+                    member_a = None
+                try:
+                    member_b = guild.get_member(p2_id) or await guild.fetch_member(p2_id)
+                except Exception:
+                    member_b = None
+
+                if member_a:
+                    view.player_a_name = member_a.display_name
+                if member_b:
+                    view.player_b_name = member_b.display_name
+        except Exception:
+            # Best-effort only; fall back to mentions in embed
+            pass
+
         embed = view.get_embed()
-        
+
         # Use followup since the interaction was already responded to in the View
         message = await interaction.followup.send(embed=embed, view=view)
         view.message = message
@@ -977,9 +1047,15 @@ class GamesCog(commands.Cog):
             return
             
         # Reconstruct Game Object
+        # Resolve Discord IDs from internal user IDs WITHOUT accessing lazy relationships
+        player_a_user = await db.get_user_by_id(session.player_a_id)
+        player_b_user = await db.get_user_by_id(session.player_b_id)
+        player_a_discord = player_a_user.discord_id if player_a_user else session.player_a_id
+        player_b_discord = player_b_user.discord_id if player_b_user else session.player_b_id
+
         game = PvPBlackjackGame(
-            player_a_id=session.player_a_id,
-            player_b_id=session.player_b_id,
+            player_a_id=player_a_discord,
+            player_b_id=player_b_discord,
             player_a_bet=session.player_a_bet,
             player_b_bet=session.player_b_bet,
             shoe=Shoe.from_dict(json.loads(session.shoe_state))

@@ -15,6 +15,7 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./config.json:/app/config.json:ro
+      - ./src:/app/src:ro
     depends_on:
       - redis
     networks:
