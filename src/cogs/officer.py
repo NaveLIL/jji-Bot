@@ -104,8 +104,8 @@ class OfficerCog(commands.Cog):
             description=f"Recruitment reward for {recruit.display_name}"
         )
         
-        # Deduct from server budget (only net amount - tax stays)
-        await db.add_rewards_paid(net_reward)
+        # Deduct from server budget (gross amount)
+        await db.add_rewards_paid(accept_reward)
         
         # Add tax to server budget
         if tax > 0:
