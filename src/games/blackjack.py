@@ -407,6 +407,72 @@ class BlackjackGame:
             else:
                 self.results.append((HandResult.PUSH, 0))
 
+    # Utilities expected by the cog/view
+    @property
+    def total_bet(self) -> float:
+        """Total amount risked by the player (includes doubles/splits)."""
+        total = 0.0
+        for h in self.player_hands:
+            total += h.bet * (2.0 if h.is_doubled else 1.0)
+        return total
+
+    def get_net_result(self) -> float:
+        """Return the net profit (positive) or loss (negative) for the player.
+
+        This sums the numeric amounts stored in `self.results` which the engine
+        records as positive for wins and negative for losses.
+        """
+        return sum(amount for _, amount in self.results) if self.results else 0.0
+
+    def get_display_embed_data(self) -> dict:
+        """Produce a compact dict used by the view to render the embed."""
+        dealer_cards = [str(c) for c in self.dealer_hand.cards]
+        dealer_value = "BUST" if self.dealer_hand.is_bust else self.dealer_hand.value
+
+        player_hands = []
+        for i, h in enumerate(self.player_hands):
+            player_hands.append({
+                "cards_list": [str(c) for c in h.cards],
+                "value": ("BUST" if h.is_bust else str(h.value)),
+                "value_numeric": h.value,
+                "is_bust": h.is_bust,
+                "is_blackjack": h.is_blackjack,
+                "is_current": (i == self.current_hand_index and not self.is_complete),
+                "bet_amount": h.bet
+            })
+
+        return {
+            "net_result": self.get_net_result(),
+            "dealer_cards_list": dealer_cards,
+            "dealer_value": dealer_value,
+            "player_hands": player_hands,
+            "results": self.results,
+            "total_bet": self.total_bet
+        }
+
+    def get_available_actions(self) -> List[str]:
+        """Return list of available action keywords for the current game/view state.
+
+        Keywords match what `EnhancedBlackjackView.update_buttons` expects:
+        - 'hit', 'stand', 'double', 'split', 'surrender', 'insurance_yes', 'insurance_no'
+        """
+        if self.state == GameState.INSURANCE_OFFERED:
+            return ["insurance_yes", "insurance_no"]
+
+        if self.state != GameState.PLAYER_TURN or not self.current_hand:
+            return []
+
+        actions: List[str] = ["hit", "stand"]
+        if self.current_hand.can_double:
+            actions.append("double")
+        if self.current_hand.can_split:
+            actions.append("split")
+        # surrender only allowed on initial two-card hand and when configured
+        if self.allow_surrender and len(self.player_hands) == 1 and len(self.current_hand.cards) == 2:
+            actions.append("surrender")
+
+        return actions
+
     def to_dict(self) -> dict:
         return {
             "user_id": self.user_id,
@@ -509,9 +575,11 @@ class PvPBlackjackGame:
             self.state = GameState.COMPLETE
             self._resolve_results()
         else:
-            # Start with Player A and immediately advance state
+            # Start with Player A - set initial turn and let outer controller
+            # (UI / event loop) invoke state progression as players act.
+            # Avoid calling _update_game_state here to prevent premature
+            # dealer resolution in edge cases during setup.
             self.state = GameState.PLAYER_A_TURN
-            self._update_game_state()
 
     @property
     def current_turn_player_id(self) -> Optional[int]:

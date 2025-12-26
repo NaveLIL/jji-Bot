@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Optional, List, Tuple, Any
 from contextlib import asynccontextmanager
+import asyncio
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy import select, update, delete, func, and_, or_
@@ -17,6 +18,7 @@ from src.models.database import (
     RateLimitEntry, SecurityLog, BotStats, TransactionType, RoleType, GameType, LogType
 )
 from src.utils.helpers import calculate_tax
+from src.services.economy_logger import economy_logger, EconomyAction
 
 
 class DatabaseService:
@@ -33,6 +35,10 @@ class DatabaseService:
             class_=AsyncSession,
             expire_on_commit=False,
         )
+        # In-process locks to serialize operations on specific user IDs
+        # This prevents lost-updates in SQLite testing environments
+        # where row-level SELECT...FOR UPDATE locking isn't effective.
+        self._locks: dict[int, asyncio.Lock] = {}
     
     async def init_db(self) -> None:
         """Initialize database tables"""
@@ -61,6 +67,33 @@ class DatabaseService:
             except Exception:
                 await session.rollback()
                 raise
+
+    @asynccontextmanager
+    async def _acquire_locks(self, ids: List[int]):
+        """Acquire in-process asyncio locks for a list of integer IDs.
+
+        Locks are acquired in ascending order to prevent deadlocks when
+        multiple IDs are requested concurrently.
+        """
+        ids_sorted = sorted(set(ids))
+        locks = []
+        try:
+            for i in ids_sorted:
+                lock = self._locks.get(i)
+                if lock is None:
+                    lock = asyncio.Lock()
+                    self._locks[i] = lock
+                locks.append(lock)
+            for l in locks:
+                await l.acquire()
+            yield
+        finally:
+            for l in reversed(locks):
+                try:
+                    l.release()
+                except RuntimeError:
+                    # ignore release errors if lock is not acquired
+                    pass
     
     # ==================== USER OPERATIONS ====================
     
@@ -191,9 +224,13 @@ class DatabaseService:
         Atomically transfer money from sender to recipient with tax.
         Returns dict with success status and details.
         """
-        async with self.session() as session:
-            if amount <= 0:
-                return {"success": False, "error": "Amount must be positive"}
+        # Acquire in-process locks for sender and recipient to avoid
+        # lost-updates in environments (like SQLite testing) where
+        # SELECT ... FOR UPDATE may not provide sufficient row-level locking.
+        async with self._acquire_locks([sender_id, recipient_id]):
+            async with self.session() as session:
+                if amount <= 0:
+                    return {"success": False, "error": "Amount must be positive"}
 
             # Sort IDs to ensure consistent locking order (Deadlock Prevention)
             first_id, second_id = sorted([sender_id, recipient_id])
@@ -1000,6 +1037,27 @@ class DatabaseService:
 
             economy.total_budget += (bet_amount * 2)
 
+            # Log economy event for PvP bet placement
+            try:
+                # use economy_logger to record bet placement as GAME_BET
+                await economy_logger.log(
+                    EconomyAction.GAME_BET,
+                    amount=bet_amount * 2,
+                    before_balance=None,
+                    after_balance=None,
+                    before_budget=economy.total_budget - (bet_amount * 2),
+                    after_budget=economy.total_budget,
+                    description=f"PvP Blackjack bets placed: {player_a_id} & {player_b_id}",
+                    details={
+                        "Player A": f"<@{player_a_id}> (${bet_amount})",
+                        "Player B": f"<@{player_b_id}> (${bet_amount})"
+                    },
+                    source="PvP Start"
+                )
+            except Exception:
+                # Logging failure should not block game start
+                pass
+
             # Create Session
             game = PvPGameSession(
                 id=game_id,
@@ -1242,31 +1300,85 @@ class DatabaseService:
                      )
                      session.add(tx)
 
+                     # Log game win event for this player
+                     try:
+                         await economy_logger.log_game(
+                             game_name="PvP Blackjack",
+                             user_id=user.discord_id,
+                             user_name=str(user.discord_id),
+                             bet=bet_amount,
+                             result="WIN",
+                             winnings=final_return,
+                             profit=raw_profit - tax,
+                             user_before=(user.balance - final_return),
+                             user_after=user.balance,
+                             budget_before=(economy.total_budget + final_return - tax),
+                             budget_after=economy.total_budget,
+                             details={
+                                 "Raw Profit": f"${raw_profit:,.2f}",
+                                 "Tax": f"${tax:,.2f}",
+                                 "Final Return": f"${final_return:,.2f}"
+                             }
+                         )
+                     except Exception:
+                         pass
+
                 elif raw_profit < 0:
-                     # Loss.
-                     # Return 0 (assuming full loss).
-                     # Budget keeps the bet.
-                     # If partial loss (surrender), base_return might be > 0.
+                    # Loss path. base_return may be > 0 for partial returns (surrender/etc).
+                    final_return = base_return
 
-                     final_return = base_return
-                     if final_return > 0:
-                         economy.total_budget -= final_return
-                         user.balance += final_return
+                    if final_return > 0:
+                        # Partial return (e.g., surrender) — move funds from budget back to user
+                        economy.total_budget -= final_return
+                        user.balance += final_return
 
-                         tx = Transaction(
+                        tx = Transaction(
                             user_id=user.id,
                             amount=final_return,
-                            transaction_type=TransactionType.GAME_WIN, # Technically a return
+                            transaction_type=TransactionType.GAME_WIN,  # Technically a return
                             tax_amount=0,
                             before_balance=user.balance - final_return,
                             after_balance=user.balance,
                             description=f"PvP Blackjack Return (Loss/Surrender)"
-                         )
-                         session.add(tx)
-                     else:
-                         # Full loss, no transaction needed to add 0, but maybe log?
-                         # Usually we log losses when bet is placed.
-                         pass
+                        )
+                        session.add(tx)
+
+                        try:
+                            await economy_logger.log_game(
+                                game_name="PvP Blackjack",
+                                user_id=user.discord_id,
+                                user_name=str(user.discord_id),
+                                bet=bet_amount,
+                                result="RETURN",
+                                winnings=final_return,
+                                profit=raw_profit,
+                                user_before=(user.balance - final_return),
+                                user_after=user.balance,
+                                budget_before=(economy.total_budget + final_return),
+                                budget_after=economy.total_budget,
+                                details={"Note": "Partial return / surrender or loss-with-refund"}
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        # Full loss (no return). Log LOSS so it appears in the economy channel.
+                        try:
+                            await economy_logger.log_game(
+                                game_name="PvP Blackjack",
+                                user_id=user.discord_id,
+                                user_name=str(user.discord_id),
+                                bet=bet_amount,
+                                result="LOSS",
+                                winnings=0,
+                                profit=raw_profit,
+                                user_before=user.balance,
+                                user_after=user.balance,
+                                budget_before=economy.total_budget,
+                                budget_after=economy.total_budget,
+                                details={"Note": "Full loss - stake kept by server"}
+                            )
+                        except Exception:
+                            pass
 
                 else:
                      # Push (0 profit)
@@ -1284,6 +1396,23 @@ class DatabaseService:
                         description="PvP Blackjack Push"
                      )
                      session.add(tx)
+                     try:
+                         await economy_logger.log_game(
+                             game_name="PvP Blackjack",
+                             user_id=user.discord_id,
+                             user_name=str(user.discord_id),
+                             bet=bet_amount,
+                             result="PUSH",
+                             winnings=final_return,
+                             profit=0,
+                             user_before=(user.balance - final_return),
+                             user_after=user.balance,
+                             budget_before=(economy.total_budget + final_return),
+                             budget_after=economy.total_budget,
+                             details={"Note": "Push - refund"}
+                         )
+                     except Exception:
+                         pass
 
                 payout_summary[pid] = {
                     "payout": final_return if 'final_return' in locals() else 0.0,

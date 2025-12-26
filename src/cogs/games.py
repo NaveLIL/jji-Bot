@@ -665,7 +665,7 @@ class PvPBlackjackView(discord.ui.View):
         
         if self.pvp_game.state == GameState.COMPLETE:
             # Game finished — offer rematch and close controls
-            self.add_item(PlayAgainButton())
+            self.add_item(PvPPlayAgainButton())
             self.add_item(ClosePVPButton())
             return
         
@@ -799,7 +799,7 @@ class PvPSplitButton(discord.ui.Button):
         await self.view.cog.process_pvp_action(self.view.game_id, "split", self.player_id, interaction)
 
 
-class PlayAgainButton(discord.ui.Button):
+class PvPPlayAgainButton(discord.ui.Button):
     def __init__(self):
         super().__init__(label="Play Again", style=discord.ButtonStyle.primary, emoji="🔁")
 
