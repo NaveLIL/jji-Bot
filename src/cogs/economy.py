@@ -272,6 +272,9 @@ class EconomyCog(commands.Cog):
                 description="Case reward"
             )
             
+            # Deduct gross reward from budget
+            await db.add_rewards_paid(reward)
+
             if tax > 0:
                 await db.add_taxes_collected(tax)
             
