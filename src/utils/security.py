@@ -106,10 +106,11 @@ def rate_limited(action: str, limit: int = 3, window: int = 60):
             # Check if user is allowed
             allowed, reason = await check_user_allowed(user_id)
             if not allowed:
-                await interaction.response.send_message(
-                    f"❌ You are currently restricted: {reason}",
-                    ephemeral=True
-                )
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        f"❌ You are currently restricted: {reason}",
+                        ephemeral=True
+                    )
                 return
             
             # Check rate limit
@@ -119,11 +120,12 @@ def rate_limited(action: str, limit: int = 3, window: int = 60):
             
             if not is_allowed:
                 reset_in = await cache.get_rate_limit_reset(user_id, action) or window
-                await interaction.response.send_message(
-                    f"⏳ Slow down! You can use this again in **{reset_in}** seconds.\n"
-                    f"Limit: {limit} per {window}s",
-                    ephemeral=True
-                )
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        f"⏳ Slow down! You can use this again in **{reset_in}** seconds.\n"
+                        f"Limit: {limit} per {window}s",
+                        ephemeral=True
+                    )
                 return
             
             return await func(self, interaction, *args, **kwargs)

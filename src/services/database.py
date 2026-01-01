@@ -224,16 +224,16 @@ class DatabaseService:
         Atomically transfer money from sender to recipient with tax.
         Returns dict with success status and details.
         """
+        if amount <= 0:
+            return {"success": False, "error": "Amount must be positive"}
+        
         # Acquire in-process locks for sender and recipient to avoid
         # lost-updates in environments (like SQLite testing) where
         # SELECT ... FOR UPDATE may not provide sufficient row-level locking.
         async with self._acquire_locks([sender_id, recipient_id]):
             async with self.session() as session:
-                if amount <= 0:
-                    return {"success": False, "error": "Amount must be positive"}
-
-            # Sort IDs to ensure consistent locking order (Deadlock Prevention)
-            first_id, second_id = sorted([sender_id, recipient_id])
+                # Sort IDs to ensure consistent locking order (Deadlock Prevention)
+                first_id, second_id = sorted([sender_id, recipient_id])
 
             # Lock both users in consistent order
             stmt = select(User).where(User.discord_id.in_([first_id, second_id])).order_by(User.discord_id).with_for_update()
@@ -502,6 +502,296 @@ class DatabaseService:
             
             return 0, value, 0
     
+    async def pay_from_budget_atomic(
+        self,
+        discord_id: int,
+        gross_amount: float,
+        net_amount: float,
+        tax_amount: float,
+        transaction_type: TransactionType,
+        description: str = None
+    ) -> dict:
+        """
+        Atomically pay a user from server budget with tax handling.
+        Budget pays gross_amount, user receives net_amount, tax stays in budget.
+        Returns dict with success status and details.
+        """
+        async with self.session() as session:
+            # Lock economy first
+            economy_result = await session.execute(
+                select(ServerEconomy).with_for_update()
+            )
+            economy = economy_result.scalar_one_or_none()
+            
+            if not economy:
+                return {"success": False, "error": "Economy not initialized"}
+            
+            # Check budget
+            if economy.total_budget < net_amount:
+                return {"success": False, "error": "Insufficient server budget"}
+            
+            # Lock user
+            user_result = await session.execute(
+                select(User).where(User.discord_id == discord_id).with_for_update()
+            )
+            user = user_result.scalar_one_or_none()
+            
+            if not user:
+                user = User(discord_id=discord_id)
+                session.add(user)
+                await session.flush()
+            
+            before_balance = user.balance
+            before_budget = economy.total_budget
+            
+            # Update balances atomically
+            user.balance += net_amount
+            economy.total_budget -= net_amount  # Only net goes out, tax stays
+            economy.total_rewards_paid += gross_amount
+            
+            if tax_amount > 0:
+                economy.total_taxes_collected += tax_amount
+            
+            # Log transaction
+            transaction = Transaction(
+                user_id=user.id,
+                amount=net_amount,
+                transaction_type=transaction_type,
+                tax_amount=tax_amount,
+                before_balance=before_balance,
+                after_balance=user.balance,
+                description=description
+            )
+            session.add(transaction)
+            
+            await session.commit()
+            
+            return {
+                "success": True,
+                "before_balance": before_balance,
+                "after_balance": user.balance,
+                "before_budget": before_budget,
+                "after_budget": economy.total_budget,
+                "net_amount": net_amount,
+                "tax": tax_amount
+            }
+    
+    async def admin_adjust_balance_atomic(
+        self,
+        discord_id: int,
+        amount: float,
+        transaction_type: TransactionType,
+        description: str = None
+    ) -> dict:
+        """
+        Atomically adjust user balance with budget synchronization.
+        For admin operations (addbalance, fine, confiscate).
+        If amount > 0: pay from budget to user
+        If amount < 0: take from user and return to budget
+        Returns dict with success status and details.
+        """
+        async with self.session() as session:
+            # Lock economy first
+            economy_result = await session.execute(
+                select(ServerEconomy).with_for_update()
+            )
+            economy = economy_result.scalar_one_or_none()
+            
+            if not economy:
+                return {"success": False, "error": "Economy not initialized"}
+            
+            # Check budget if adding money
+            if amount > 0 and economy.total_budget < amount:
+                return {"success": False, "error": "Insufficient server budget"}
+            
+            # Lock user
+            user_result = await session.execute(
+                select(User).where(User.discord_id == discord_id).with_for_update()
+            )
+            user = user_result.scalar_one_or_none()
+            
+            if not user:
+                user = User(discord_id=discord_id)
+                session.add(user)
+                await session.flush()
+            
+            # Check user balance if removing money
+            if amount < 0 and user.balance < abs(amount):
+                return {"success": False, "error": "Insufficient user balance"}
+            
+            before_balance = user.balance
+            before_budget = economy.total_budget
+            
+            # Update balances atomically
+            user.balance += amount
+            
+            if amount > 0:
+                # Admin gives money: deduct from budget, track rewards
+                economy.total_budget -= amount
+                economy.total_rewards_paid += amount
+            else:
+                # Admin takes money: return to budget
+                economy.total_budget += abs(amount)
+            
+            # Log transaction
+            transaction = Transaction(
+                user_id=user.id,
+                amount=amount,
+                transaction_type=transaction_type,
+                before_balance=before_balance,
+                after_balance=user.balance,
+                description=description
+            )
+            session.add(transaction)
+            
+            await session.commit()
+            
+            return {
+                "success": True,
+                "before_balance": before_balance,
+                "after_balance": user.balance,
+                "before_budget": before_budget,
+                "after_budget": economy.total_budget
+            }
+    
+    async def place_bet_atomic(
+        self,
+        discord_id: int,
+        bet_amount: float,
+        description: str = "Game bet"
+    ) -> dict:
+        """
+        Atomically deduct bet from user and add to server budget.
+        Returns dict with success status and balance details.
+        """
+        async with self.session() as session:
+            # Lock user first
+            user_result = await session.execute(
+                select(User).where(User.discord_id == discord_id).with_for_update()
+            )
+            user = user_result.scalar_one_or_none()
+            
+            if not user:
+                return {"success": False, "error": "User not found"}
+            
+            if user.balance < bet_amount:
+                return {"success": False, "error": "Insufficient funds"}
+            
+            # Lock economy
+            economy_result = await session.execute(
+                select(ServerEconomy).with_for_update()
+            )
+            economy = economy_result.scalar_one_or_none()
+            
+            if not economy:
+                return {"success": False, "error": "Economy not initialized"}
+            
+            before_balance = user.balance
+            before_budget = economy.total_budget
+            
+            # Atomically update both
+            user.balance -= bet_amount
+            economy.total_budget += bet_amount
+            
+            # Log transaction
+            transaction = Transaction(
+                user_id=user.id,
+                amount=-bet_amount,
+                transaction_type=TransactionType.GAME_LOSS,
+                tax_amount=0,
+                before_balance=before_balance,
+                after_balance=user.balance,
+                description=description
+            )
+            session.add(transaction)
+            
+            await session.commit()
+            
+            return {
+                "success": True,
+                "before_balance": before_balance,
+                "after_balance": user.balance,
+                "before_budget": before_budget,
+                "after_budget": economy.total_budget
+            }
+    
+    async def resolve_game_win_atomic(
+        self,
+        discord_id: int,
+        bet_amount: float,
+        profit_amount: float,
+        tax_rate: float,
+        description: str = "Game win"
+    ) -> dict:
+        """
+        Atomically resolve a game win: pay back bet + profit (minus tax).
+        Tax stays in budget.
+        Returns dict with success status and details.
+        """
+        async with self.session() as session:
+            # Lock user
+            user_result = await session.execute(
+                select(User).where(User.discord_id == discord_id).with_for_update()
+            )
+            user = user_result.scalar_one_or_none()
+            
+            if not user:
+                return {"success": False, "error": "User not found"}
+            
+            # Lock economy
+            economy_result = await session.execute(
+                select(ServerEconomy).with_for_update()
+            )
+            economy = economy_result.scalar_one_or_none()
+            
+            if not economy:
+                return {"success": False, "error": "Economy not initialized"}
+            
+            # Calculate tax on profit only
+            tax_amount = profit_amount * (tax_rate / 100)
+            net_profit = profit_amount - tax_amount
+            total_payout = bet_amount + net_profit
+            
+            before_balance = user.balance
+            before_budget = economy.total_budget
+            
+            # Check budget
+            if economy.total_budget < total_payout:
+                return {"success": False, "error": "Insufficient server budget"}
+            
+            # Atomically update
+            user.balance += total_payout
+            economy.total_budget -= total_payout
+            economy.total_rewards_paid += total_payout
+            
+            if tax_amount > 0:
+                economy.total_taxes_collected += tax_amount
+            
+            # Log transaction
+            transaction = Transaction(
+                user_id=user.id,
+                amount=total_payout,
+                transaction_type=TransactionType.GAME_WIN,
+                tax_amount=tax_amount,
+                before_balance=before_balance,
+                after_balance=user.balance,
+                description=description
+            )
+            session.add(transaction)
+            
+            await session.commit()
+            
+            return {
+                "success": True,
+                "before_balance": before_balance,
+                "after_balance": user.balance,
+                "before_budget": before_budget,
+                "after_budget": economy.total_budget,
+                "total_payout": total_payout,
+                "net_profit": net_profit,
+                "tax": tax_amount
+            }
+    
     async def add_taxes_collected(self, amount: float) -> None:
         """Add to total taxes collected"""
         async with self.session() as session:
@@ -680,6 +970,90 @@ class DatabaseService:
             await session.commit()
             return True, f"Successfully purchased {role.name}!"
     
+    async def purchase_role_with_tax(
+        self, 
+        discord_id: int, 
+        role_discord_id: int,
+        tax_rate: float
+    ) -> Tuple[bool, str, float]:
+        """
+        Purchase a role with tax atomically.
+        Returns (success, message, tax_amount)
+        Tax goes to budget, role price also goes to budget.
+        """
+        async with self.session() as session:
+            # Get user with lock
+            user_result = await session.execute(
+                select(User).where(User.discord_id == discord_id).with_for_update()
+            )
+            user = user_result.scalar_one_or_none()
+            
+            if not user:
+                return False, "User not found", 0
+            
+            # Get role
+            role_result = await session.execute(
+                select(Role).where(Role.discord_id == role_discord_id)
+            )
+            role = role_result.scalar_one_or_none()
+            
+            if not role:
+                return False, "Role not found", 0
+            
+            if not role.is_available:
+                return False, "Role is not available", 0
+            
+            # Check if already owned
+            existing = await session.execute(
+                select(UserRole).where(
+                    UserRole.user_id == user.id,
+                    UserRole.role_id == role.id
+                )
+            )
+            if existing.scalar_one_or_none():
+                return False, "You already own this role", 0
+            
+            # Calculate total with tax
+            tax_amount = role.price * (tax_rate / 100)
+            total_cost = role.price + tax_amount
+            
+            # Check balance for total
+            if user.balance < total_cost:
+                return False, f"Insufficient balance. Need ${total_cost:.2f}", 0
+            
+            # Lock economy
+            economy_result = await session.execute(
+                select(ServerEconomy).with_for_update()
+            )
+            economy = economy_result.scalar_one_or_none()
+            
+            # Process purchase atomically
+            before_balance = user.balance
+            user.balance -= total_cost
+            
+            user_role = UserRole(user_id=user.id, role_id=role.id)
+            session.add(user_role)
+            
+            # Add to budget: role price + tax
+            if economy:
+                economy.total_budget += total_cost
+                economy.total_taxes_collected += tax_amount
+            
+            # Log transaction (full amount including tax)
+            transaction = Transaction(
+                user_id=user.id,
+                amount=-total_cost,
+                transaction_type=TransactionType.ROLE_PURCHASE,
+                tax_amount=tax_amount,
+                before_balance=before_balance,
+                after_balance=user.balance,
+                description=f"Purchased role: {role.name} (incl. tax)"
+            )
+            session.add(transaction)
+            
+            await session.commit()
+            return True, f"Successfully purchased {role.name}!", tax_amount
+    
     async def sell_role(
         self, 
         discord_id: int, 
@@ -811,6 +1185,7 @@ class DatabaseService:
                 select(CaseUse)
                 .where(CaseUse.user_id == user.id)
                 .order_by(CaseUse.last_used.desc())
+                .limit(1)
             )
             case_use = result.scalar_one_or_none()
             
@@ -1362,6 +1737,8 @@ class DatabaseService:
                             pass
                     else:
                         # Full loss (no return). Log LOSS so it appears in the economy channel.
+                        # Note: Bet was already deducted at game start, so we show balance change from that point
+                        balance_before_bet = user.balance + bet_amount  # What balance was BEFORE bet was placed
                         try:
                             await economy_logger.log_game(
                                 game_name="PvP Blackjack",
@@ -1370,12 +1747,12 @@ class DatabaseService:
                                 bet=bet_amount,
                                 result="LOSS",
                                 winnings=0,
-                                profit=raw_profit,
-                                user_before=user.balance,
-                                user_after=user.balance,
-                                budget_before=economy.total_budget,
-                                budget_after=economy.total_budget,
-                                details={"Note": "Full loss - stake kept by server"}
+                                profit=-bet_amount,  # Show actual loss amount
+                                user_before=balance_before_bet,  # Balance before bet was placed
+                                user_after=user.balance,  # Current balance (after bet was taken)
+                                budget_before=economy.total_budget - bet_amount,  # Budget before bet
+                                budget_after=economy.total_budget,  # Budget now includes lost bet
+                                details={"Note": "Full loss - bet was deducted at game start"}
                             )
                         except Exception:
                             pass
@@ -1576,6 +1953,97 @@ class DatabaseService:
             )
             return list(result.scalars().all())
     
+    async def get_economy_stats(self) -> dict:
+        """Get comprehensive economy statistics for admin panel"""
+        async with self.session() as session:
+            # Active voice sessions with role breakdown
+            sessions_result = await session.execute(
+                select(VoiceSession)
+                .where(VoiceSession.is_active == True)
+                .options(selectinload(VoiceSession.user))
+            )
+            sessions = list(sessions_result.scalars().all())
+            
+            soldiers_in_voice = 0
+            sergeants_in_voice = 0
+            officers_in_voice = 0
+            
+            for vs in sessions:
+                if vs.user:
+                    if vs.user.is_officer:
+                        officers_in_voice += 1
+                    elif vs.user.is_sergeant:
+                        sergeants_in_voice += 1
+                    elif vs.user.is_soldier:
+                        soldiers_in_voice += 1
+            
+            # User counts by role
+            soldier_count = await session.execute(
+                select(func.count(User.id)).where(User.is_soldier == True)
+            )
+            sergeant_count = await session.execute(
+                select(func.count(User.id)).where(User.is_sergeant == True)
+            )
+            officer_count = await session.execute(
+                select(func.count(User.id)).where(User.is_officer == True)
+            )
+            
+            # Game statistics - wins and losses today
+            today = datetime.utcnow().date()
+            
+            game_wins_result = await session.execute(
+                select(func.count(Transaction.id), func.sum(Transaction.amount))
+                .where(
+                    Transaction.transaction_type == TransactionType.GAME_WIN,
+                    func.date(Transaction.timestamp) == today
+                )
+            )
+            game_wins_row = game_wins_result.one()
+            game_wins_count = game_wins_row[0] or 0
+            game_wins_amount = game_wins_row[1] or 0.0
+            
+            game_losses_result = await session.execute(
+                select(func.count(Transaction.id), func.sum(Transaction.amount))
+                .where(
+                    Transaction.transaction_type == TransactionType.GAME_LOSS,
+                    func.date(Transaction.timestamp) == today
+                )
+            )
+            game_losses_row = game_losses_result.one()
+            game_losses_count = game_losses_row[0] or 0
+            game_losses_amount = abs(game_losses_row[1] or 0.0)
+            
+            # Recent admin actions (last 10)
+            admin_types = [
+                TransactionType.ADMIN_ADD, 
+                TransactionType.ADMIN_SET,
+                TransactionType.FINE,
+                TransactionType.CONFISCATE
+            ]
+            admin_actions_result = await session.execute(
+                select(Transaction)
+                .where(Transaction.transaction_type.in_(admin_types))
+                .order_by(Transaction.timestamp.desc())
+                .limit(10)
+                .options(selectinload(Transaction.user))
+            )
+            admin_actions = list(admin_actions_result.scalars().all())
+            
+            return {
+                "active_sessions": len(sessions),
+                "soldiers_in_voice": soldiers_in_voice,
+                "sergeants_in_voice": sergeants_in_voice,
+                "officers_in_voice": officers_in_voice,
+                "total_soldiers": soldier_count.scalar() or 0,
+                "total_sergeants": sergeant_count.scalar() or 0,
+                "total_officers": officer_count.scalar() or 0,
+                "game_wins_today": game_wins_count,
+                "game_wins_amount": game_wins_amount,
+                "game_losses_today": game_losses_count,
+                "game_losses_amount": game_losses_amount,
+                "admin_actions": admin_actions
+            }
+
     async def claim_master_bonus(self, discord_id: int) -> bool:
         """Claim daily master channel bonus. Returns True if claimed."""
         async with self.session() as session:

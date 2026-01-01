@@ -373,4 +373,5 @@ class RedisService:
 
 
 # Global Redis instance
-cache = RedisService()
+import os
+cache = RedisService(os.getenv("REDIS_URL", "redis://localhost:6379"))

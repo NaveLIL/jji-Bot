@@ -39,11 +39,11 @@
     },
     "case": {
         "cooldown_hours": 24,
-        "empty_chance": 99,
+        "empty_chance": 30,
         "reward_weights": {
             "low": {
                 "range": [
-                    2,
+                    1,
                     5
                 ],
                 "weight": 60
@@ -51,14 +51,14 @@
             "medium": {
                 "range": [
                     6,
-                    10
+                    15
                 ],
                 "weight": 30
             },
             "high": {
                 "range": [
-                    11,
-                    17
+                    16,
+                    50
                 ],
                 "weight": 10
             }

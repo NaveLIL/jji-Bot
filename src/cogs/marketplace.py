@@ -13,6 +13,7 @@ from ..models.database import RoleType, Role, TransactionType
 from ..services.database import db
 from ..services.economy_logger import economy_logger
 from ..utils.helpers import format_balance, calculate_tax
+from ..utils.security import rate_limited
 
 
 logger = logging.getLogger(__name__)
@@ -424,15 +425,14 @@ class MarketplaceCog(commands.Cog):
                         pass
                 await db.sell_role(interaction.user.id, ur.role.discord_id, refund_percentage=0)
         
-        # Buy new role
-        success, msg = await db.purchase_role(interaction.user.id, role_id)
+        # Buy new role with tax atomically
+        success, msg, actual_tax = await db.purchase_role_with_tax(
+            interaction.user.id, 
+            role_id,
+            economy.tax_rate
+        )
         if not success:
             return await interaction.followup.send(f"❌ {msg}", ephemeral=True)
-        
-        # Deduct tax
-        if tax > 0:
-            await db.update_user_balance(interaction.user.id, -tax, TransactionType.TAX, description=f"Tax: {role.name}")
-            await db.add_taxes_collected(tax)
         
         # Assign role
         discord_role = interaction.guild.get_role(role_id)
@@ -491,15 +491,14 @@ class MarketplaceCog(commands.Cog):
                 ephemeral=True
             )
         
-        # Buy role
-        success, msg = await db.purchase_role(interaction.user.id, role_id)
+        # Buy role with tax atomically
+        success, msg, actual_tax = await db.purchase_role_with_tax(
+            interaction.user.id, 
+            role_id,
+            economy.tax_rate
+        )
         if not success:
             return await interaction.followup.send(f"❌ {msg}", ephemeral=True)
-        
-        # Deduct tax
-        if tax > 0:
-            await db.update_user_balance(interaction.user.id, -tax, TransactionType.TAX, description=f"Tax: {role.name}")
-            await db.add_taxes_collected(tax)
         
         # Assign role
         member = interaction.guild.get_member(interaction.user.id)
@@ -573,16 +572,18 @@ class MarketplaceCog(commands.Cog):
             budget_after=economy_after.total_budget
         )
         
-        await interaction.followup.send(f"💰 Sold **{role.name}** for **{format_balance(refund)}**!", ephemeral=True)
+        await interaction.followup.send(f"Sold **{role.name}** for **{format_balance(refund)}**!", ephemeral=True)
     
     # === COMMANDS ===
     
     @app_commands.command(name="shop", description="Open the role shop")
+    @rate_limited("shop", limit=5, window=60)
     async def shop(self, interaction: discord.Interaction):
         await interaction.response.defer()
         await self._show_shop(interaction, interaction.user.id)
     
     @app_commands.command(name="inventory", description="View your roles")
+    @rate_limited("shop", limit=5, window=60)
     async def inventory(self, interaction: discord.Interaction):
         await interaction.response.defer()
         user_roles = await db.get_user_roles(interaction.user.id)
@@ -590,11 +591,13 @@ class MarketplaceCog(commands.Cog):
         await interaction.followup.send(embed=view.build_embed(), view=view)
     
     @app_commands.command(name="myroles", description="View your roles")
+    @rate_limited("shop", limit=5, window=60)
     async def myroles(self, interaction: discord.Interaction):
         await self.inventory(interaction)
     
     @app_commands.command(name="sellrole", description="Sell a role (10% refund)")
     @app_commands.describe(role="Role to sell")
+    @rate_limited("shop", limit=3, window=60)
     async def sellrole(self, interaction: discord.Interaction, role: discord.Role):
         user_roles = await db.get_user_roles(interaction.user.id)
         owned = next((ur for ur in user_roles if ur.role.discord_id == role.id), None)

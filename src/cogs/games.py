@@ -188,7 +188,11 @@ class EnhancedBlackjackView(discord.ui.View):
         
         if self.game.is_complete:
             dealer_display = get_fancy_card_display(dealer_cards, hide_first=False)
-            dealer_header = f"🎩 DEALER — **{dealer_value}**"
+            # Show BUST clearly instead of number > 21
+            if dealer_value == "BUST" or (isinstance(dealer_value, int) and dealer_value > 21):
+                dealer_header = "🎩 DEALER — **BUST** 💥"
+            else:
+                dealer_header = f"🎩 DEALER — **{dealer_value}**"
         else:
             dealer_display = get_fancy_card_display(dealer_cards, hide_first=True)
             dealer_header = "🎩 DEALER — **?**"
@@ -204,23 +208,23 @@ class EnhancedBlackjackView(discord.ui.View):
             player_cards = hand.get("cards_list", [])
             hand_value_str = hand["value"]  # Display string like "21", "21 (soft)", "BUST"
             numeric_value = hand.get("value_numeric", 0)  # Numeric value for comparisons
-            is_bust = hand.get("is_bust", False)
+            is_bust = hand.get("is_bust", False) or numeric_value > 21  # Extra safety check
             is_blackjack = hand.get("is_blackjack", False)
             is_current = hand.get("is_current", False)
             hand_bet = hand.get("bet_amount", self.bet)  # Numeric bet amount
             
             if is_bust:
                 status_icon = "💥 BUST"
-                value_display = f"~~{numeric_value}~~"
+                value_display = "**BUST**"  # Show BUST instead of the number
             elif is_blackjack:
                 status_icon = "🎰 BLACKJACK!"
-                value_display = f"**{hand_value_str}**"
+                value_display = "**21**"
             elif numeric_value == 21:
                 status_icon = "✨ 21!"
-                value_display = f"**{hand_value_str}**"
+                value_display = "**21**"
             else:
                 status_icon = ""
-                value_display = f"**{hand_value_str}**"
+                value_display = f"**{numeric_value}**"
             
             pointer = "➤ " if is_current and not self.game.is_complete else ""
             hand_label = f"Hand #{i+1}" if len(data["player_hands"]) > 1 else "YOUR HAND"
@@ -343,6 +347,9 @@ class EnhancedBlackjackView(discord.ui.View):
                 loss_amount = abs(net_result)  # Actual loss (accounts for split/double)
                 metrics.track_game("blackjack", "lose", total_bet)
                 
+                # Calculate balance BEFORE bet was placed for accurate logging
+                balance_before_bet = user_before + total_bet  # Restore what balance was before bet
+                
                 # Log game result
                 economy_after = await db.get_server_economy()
                 await economy_logger.log_game(
@@ -353,9 +360,9 @@ class EnhancedBlackjackView(discord.ui.View):
                     result="LOSS",
                     winnings=0,
                     profit=-loss_amount,
-                    user_before=user_before,
-                    user_after=user_before,  # Balance unchanged (bets already deducted)
-                    budget_before=budget_before,
+                    user_before=balance_before_bet,  # Balance BEFORE bet was placed
+                    user_after=user_before,  # Current balance (after bet was taken at start)
+                    budget_before=budget_before - total_bet,  # Budget BEFORE bet was added
                     budget_after=economy_after.total_budget,
                     details={
                         "Initial Bet": f"${self.bet:,.2f}",
@@ -706,44 +713,67 @@ class PvPBlackjackView(discord.ui.View):
         )
         
         # Players: render hands in clear code blocks (dealer removed for PvP)
-        def render_player_block(hands, current_turn_state, current_index):
+        def render_player_block(hands, current_turn_state, current_index, results_list=None):
             lines = []
             for i, hand in enumerate(hands):
                 cards = [c.to_dict()["rank"]+c.to_dict()["suit"] for c in hand.cards]
-                val = hand.value
-                suffix = " BUST" if hand.is_bust else (" BJ!" if hand.is_blackjack else "")
-                pointer = " <- ACTIVE" if (current_turn_state and i == current_index) else ""
-                lines.append(f"Hand {i+1}: {get_fancy_card_display(cards)} ({val}){suffix}{pointer}")
+                
+                # Clear value display - BUST shows as BUST, not the number
+                if hand.is_bust:
+                    val_display = "BUST"
+                elif hand.is_blackjack:
+                    val_display = "21 BJ!"
+                else:
+                    val_display = str(hand.value)
+                
+                pointer = " ◄" if (current_turn_state and i == current_index) else ""
+                
+                # Show result if game complete
+                result_str = ""
+                if results_list and i < len(results_list):
+                    res_type, amt = results_list[i]
+                    if res_type.value in ("win", "blackjack"):
+                        result_str = f" ✓ +${amt:.0f}"
+                    elif res_type.value in ("lose", "bust"):
+                        result_str = f" ✗ -${abs(amt):.0f}"
+                    elif res_type.value == "push":
+                        result_str = " = PUSH"
+                
+                lines.append(f"Hand {i+1}: {get_fancy_card_display(cards)} [{val_display}]{pointer}{result_str}")
             return "```text\n" + "\n".join(lines) + "\n```"
 
-        pa_name = getattr(self, "player_a_name", None)
-        pa_label = f"{pa_name} — <@{self.pvp_game.player_a_id}>" if pa_name else f"<@{self.pvp_game.player_a_id}>"
-        a_block = render_player_block(self.pvp_game.player_a_hands, self.pvp_game.state == GameState.PLAYER_A_TURN, self.pvp_game.current_hand_index_a)
-        embed.add_field(name=f"👤 Player A ({pa_label}) — Bet: {format_balance(self.pvp_game.player_a_bet)}", value=a_block, inline=False)
-
-        pb_name = getattr(self, "player_b_name", None)
-        pb_label = f"{pb_name} — <@{self.pvp_game.player_b_id}>" if pb_name else f"<@{self.pvp_game.player_b_id}>"
-        b_block = render_player_block(self.pvp_game.player_b_hands, self.pvp_game.state == GameState.PLAYER_B_TURN, self.pvp_game.current_hand_index_b)
-        embed.add_field(name=f"👤 Player B ({pb_label}) — Bet: {format_balance(self.pvp_game.player_b_bet)}", value=b_block, inline=False)
+        # Get results for display
+        a_results = self.pvp_game.results.get(self.pvp_game.player_a_id) if self.pvp_game.state == GameState.COMPLETE else None
+        b_results = self.pvp_game.results.get(self.pvp_game.player_b_id) if self.pvp_game.state == GameState.COMPLETE else None
         
-        # Results
+        pa_label = f"<@{self.pvp_game.player_a_id}>"
+        a_block = render_player_block(self.pvp_game.player_a_hands, self.pvp_game.state == GameState.PLAYER_A_TURN, self.pvp_game.current_hand_index_a, a_results)
+        embed.add_field(name=f"🔵 Player A ({pa_label}) — ${self.pvp_game.player_a_bet:.0f}", value=a_block, inline=False)
+
+        pb_label = f"<@{self.pvp_game.player_b_id}>"
+        b_block = render_player_block(self.pvp_game.player_b_hands, self.pvp_game.state == GameState.PLAYER_B_TURN, self.pvp_game.current_hand_index_b, b_results)
+        embed.add_field(name=f"🟠 Player B ({pb_label}) — ${self.pvp_game.player_b_bet:.0f}", value=b_block, inline=False)
+        
+        # Final summary
         if self.pvp_game.state == GameState.COMPLETE:
-            res_str = ""
-            if self.pvp_game.player_a_id in self.pvp_game.results:
-                res = self.pvp_game.results[self.pvp_game.player_a_id]
-                total_profit = sum(r[1] for r in res)
-                res_str += f"<@{self.pvp_game.player_a_id}>: {'+' if total_profit >= 0 else ''}{total_profit:.0f}\n"
+            a_total = sum(r[1] for r in self.pvp_game.results.get(self.pvp_game.player_a_id, []))
+            b_total = sum(r[1] for r in self.pvp_game.results.get(self.pvp_game.player_b_id, []))
+            
+            # Determine winner
+            if a_total > b_total:
+                winner = f"🏆 <@{self.pvp_game.player_a_id}> WINS!"
+            elif b_total > a_total:
+                winner = f"🏆 <@{self.pvp_game.player_b_id}> WINS!"
+            else:
+                winner = "🤝 TIE GAME"
+            
+            summary = f"{winner}\n\n"
+            summary += f"<@{self.pvp_game.player_a_id}>: **{'+' if a_total >= 0 else ''}{a_total:.0f}**\n"
+            summary += f"<@{self.pvp_game.player_b_id}>: **{'+' if b_total >= 0 else ''}{b_total:.0f}**"
+            
+            embed.add_field(name="📊 FINAL RESULT", value=summary, inline=False)
 
-            if self.pvp_game.player_b_id in self.pvp_game.results:
-                res = self.pvp_game.results[self.pvp_game.player_b_id]
-                total_profit = sum(r[1] for r in res)
-                res_str += f"<@{self.pvp_game.player_b_id}>: {'+' if total_profit >= 0 else ''}{total_profit:.0f}\n"
-
-            embed.add_field(name="📊 RESULTS", value=res_str, inline=False)
-
-        # Use cached display names when available to show readable names on all clients
-        # Footer: do not include test build tag in production embeds
-        embed.set_footer(text="Developed by NaveL for JJI in 2025")
+        embed.set_footer(text="PvP Blackjack • Winner takes opponent's bet")
 
         return embed
 
@@ -865,8 +895,9 @@ class GamesCog(commands.Cog):
         self.bot = bot
         self.config = load_config()
     
-    @app_commands.command(name="blackjack", description="🃏 Play Blackjack against the dealer! (Private game)")
+    @app_commands.command(name="blackjack", description="Play Blackjack against the dealer")
     @app_commands.describe(bet="Amount to bet ($1 - $10,000)")
+    @game_rate_limited(cooldown_seconds=10)
     async def blackjack(self, interaction: discord.Interaction, bet: float):
         """Start a solo blackjack game"""
         existing = await cache.get_game_state(interaction.user.id, "blackjack")
@@ -921,8 +952,9 @@ class GamesCog(commands.Cog):
         
         metrics.set_active_games("blackjack", 1)
     
-    @app_commands.command(name="blackjack_pvp", description="⚔️ Challenge another player to Blackjack PvP!")
+    @app_commands.command(name="blackjack_pvp", description="Challenge another player to Blackjack PvP")
     @app_commands.describe(opponent="The player you want to challenge", bet="Amount to bet")
+    @game_rate_limited(cooldown_seconds=30)
     async def blackjack_pvp(self, interaction: discord.Interaction, opponent: discord.User, bet: float):
         """Start a PvP blackjack game"""
         if opponent.id == interaction.user.id:
@@ -1085,9 +1117,19 @@ class GamesCog(commands.Cog):
             updated = True
         elif action == "double":
             game.double(user_id)
+            # Update local bet amount for accurate payout calculation
+            if user_id == game.player_a_id:
+                game.player_a_bet += check_funds_amount
+            elif user_id == game.player_b_id:
+                game.player_b_bet += check_funds_amount
             updated = True
         elif action == "split":
             game.split(user_id)
+            # Update local bet amount for accurate payout calculation
+            if user_id == game.player_a_id:
+                game.player_a_bet += check_funds_amount
+            elif user_id == game.player_b_id:
+                game.player_b_bet += check_funds_amount
             updated = True
             
         if updated:
@@ -1179,8 +1221,9 @@ class GamesCog(commands.Cog):
                 # Delete session
                 await db.delete_pvp_game_session(game_id)
     
-    @app_commands.command(name="coinflip", description="🪙 Flip a coin - heads or tails! (Private game)")
+    @app_commands.command(name="coinflip", description="Flip a coin - heads or tails")
     @app_commands.describe(bet="Amount to bet ($1 - $10,000)", side="Choose your side")
+    @game_rate_limited(cooldown_seconds=5)
     async def coinflip(self, interaction: discord.Interaction, bet: float, side: Literal["heads", "tails"]):
         """Play coinflip"""
         user = await db.get_or_create_user(interaction.user.id)
@@ -1198,18 +1241,24 @@ class GamesCog(commands.Cog):
             await interaction.response.send_message(f"❌ {error}", ephemeral=True)
             return
         
-        success, _, _ = await db.update_user_balance(interaction.user.id, -bet, TransactionType.GAME_LOSS, description="Coinflip bet")
+        # Place bet ATOMICALLY - deduct from user and add to budget in one transaction
+        bet_result = await db.place_bet_atomic(interaction.user.id, bet, description="Coinflip bet")
         
-        if not success:
-            await interaction.response.send_message("❌ Failed to place bet. Please try again.", ephemeral=True)
+        if not bet_result["success"]:
+            await interaction.response.send_message(f"❌ {bet_result.get('error', 'Failed to place bet')}", ephemeral=True)
             return
-        
-        # Bet goes to server budget (closed-loop economy)
-        await db.update_server_budget(bet)
         
         game, error = create_coinflip_game(interaction.user.id, bet, side)
         if error:
-            await db.update_user_balance(interaction.user.id, bet, TransactionType.GAME_WIN, description="Coinflip bet refund")
+            # Refund bet atomically
+            await db.pay_from_budget_atomic(
+                discord_id=interaction.user.id,
+                gross_amount=bet,
+                net_amount=bet,
+                tax_amount=0,
+                transaction_type=TransactionType.GAME_WIN,
+                description="Coinflip bet refund"
+            )
             await interaction.response.send_message(f"❌ {error}", ephemeral=True)
             return
         
@@ -1237,31 +1286,33 @@ class GamesCog(commands.Cog):
         result = game.flip(edge_chance)
         
         if result == CoinflipResult.WIN:
-            # Player wins - calculate tax only on PROFIT, not on bet return
+            # Player wins - resolve ATOMICALLY
             profit_amount = game.winnings  # This is just the profit (equal to bet for 1:1)
             
             economy = await db.get_server_economy()
-            net_profit, tax = calculate_tax(profit_amount, economy.tax_rate)
             
-            # Total payout = bet back + net profit after tax
-            total_payout = bet + net_profit
+            # Resolve win atomically - pays back bet + profit (minus tax)
+            win_result = await db.resolve_game_win_atomic(
+                discord_id=interaction.user.id,
+                bet_amount=bet,
+                profit_amount=profit_amount,
+                tax_rate=economy.tax_rate,
+                description="Coinflip win"
+            )
             
-            # Deduct total payout from server budget
-            await db.update_server_budget(-total_payout)
+            if not win_result["success"]:
+                await message.edit(content=f"❌ Error resolving win: {win_result.get('error')}")
+                return
             
-            # Give player their winnings (no additional tax deduction - already calculated)
-            await db.update_user_balance(interaction.user.id, total_payout, TransactionType.GAME_WIN, description="Coinflip win")
-            
-            if tax > 0:
-                await db.add_taxes_collected(tax)
+            total_payout = win_result["total_payout"]
+            net_profit = win_result["net_profit"]
+            tax = win_result["tax"]
             
             color = 0x00FF00
             result_text = f"🎉 **{game.result_side.upper()}** - YOU WIN!"
             profit = f"+{format_balance(net_profit)}"  # Show actual profit after tax
             
             # Log game
-            economy_after = await db.get_server_economy()
-            user_after = await db.get_or_create_user(interaction.user.id)
             await economy_logger.log_game(
                 game_name="Coinflip",
                 user_id=interaction.user.id,
@@ -1271,9 +1322,9 @@ class GamesCog(commands.Cog):
                 winnings=total_payout,
                 profit=net_profit,
                 user_before=user_before,
-                user_after=user_after.balance,
+                user_after=win_result["after_balance"],
                 budget_before=budget_before,
-                budget_after=economy_after.total_budget,
+                budget_after=win_result["after_budget"],
                 details={
                     "Choice": side.upper(),
                     "Landed On": game.result_side.upper(),
@@ -1283,7 +1334,7 @@ class GamesCog(commands.Cog):
                 }
             )
         elif result == CoinflipResult.EDGE:
-            # Edge - money stays in server budget (already there)
+            # Edge - money stays in server budget (already there from place_bet_atomic)
             color = 0x9B59B6
             result_text = "😱 **EDGE** - The coin landed on its edge!"
             profit = f"-{format_balance(bet)}"
@@ -1327,11 +1378,16 @@ class GamesCog(commands.Cog):
                 details={"Choice": side.upper(), "Landed On": game.result_side.upper()}
             )
         
-        embed = discord.Embed(title="🪙 COINFLIP - RESULT", description=f"```ansi\n\u001b[1;33m{result_text}\u001b[0m\n```", color=color)
-        embed.add_field(name="Your Choice", value=side.upper(), inline=True)
-        embed.add_field(name="Result", value=game.result_side.upper() if game.result_side else "EDGE", inline=True)
-        embed.add_field(name="Bet", value=format_balance(bet), inline=True)
-        embed.add_field(name="Profit/Loss", value=profit, inline=True)
+        # Build clean result embed (no ANSI codes)
+        embed = discord.Embed(
+            title="🪙 COINFLIP - RESULT",
+            description=f"**{result_text}**",
+            color=color
+        )
+        embed.add_field(name="Your Choice", value=f"`{side.upper()}`", inline=True)
+        embed.add_field(name="Result", value=f"`{game.result_side.upper() if game.result_side else 'EDGE'}`", inline=True)
+        embed.add_field(name="Bet", value=f"`{format_balance(bet)}`", inline=True)
+        embed.add_field(name="Profit/Loss", value=f"`{profit}`", inline=True)
         embed.set_footer(text="Developed by NaveL for JJI in 2025")
         
         await message.edit(embed=embed)

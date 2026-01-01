@@ -106,16 +106,18 @@ class JJIBot(commands.Bot):
         EconomyLogger.setup(self)
         self.logger.info("Economy Logger initialized")
         
-        # Sync commands
+        # Sync commands to guild (faster updates than global)
         try:
             guild_id = self.config.get("guild_id")
             if guild_id:
                 guild = discord.Object(id=guild_id)
+                # Copy all commands to guild and sync
                 self.tree.copy_global_to(guild=guild)
-                await self.tree.sync(guild=guild)
+                synced = await self.tree.sync(guild=guild)
+                self.logger.info(f"Commands synced: {len(synced)} to guild")
             else:
-                await self.tree.sync()
-            self.logger.info("Commands synced")
+                synced = await self.tree.sync()
+                self.logger.info(f"Commands synced: {len(synced)} globally")
         except Exception as e:
             self.logger.error(f"Failed to sync commands: {e}")
         
@@ -323,17 +325,18 @@ class JJIBot(commands.Bot):
             claimed = await db.claim_master_bonus(member.id)
             if claimed:
                 bonus = config.get("salaries", {}).get("sergeant_master_bonus", 50)
-                economy = await db.get_server_economy()
                 
-                if economy.total_budget >= bonus:
-                    await db.update_user_balance(
-                        member.id,
-                        bonus,
-                        TransactionType.MASTER_BONUS,
-                        description="Daily Squadron Battle host bonus"
-                    )
-                    await db.add_rewards_paid(bonus)  # This deducts from budget and tracks stats
-                    
+                # Pay bonus atomically from budget (no tax on bonuses)
+                result = await db.pay_from_budget_atomic(
+                    discord_id=member.id,
+                    gross_amount=bonus,
+                    net_amount=bonus,  # No tax on bonus
+                    tax_amount=0,
+                    transaction_type=TransactionType.MASTER_BONUS,
+                    description="Daily Squadron Battle host bonus"
+                )
+                
+                if result["success"]:
                     self.logger.info(f"Sergeant {member} claimed SB host bonus: ${bonus}")
                     metrics.track_transaction("master_bonus")
                     
@@ -347,6 +350,8 @@ class JJIBot(commands.Bot):
                         await member.send(embed=dm_embed)
                     except Exception:
                         pass
+                else:
+                    self.logger.warning(f"Failed to pay SB bonus to {member}: {result.get('error')}")
                         
         except discord.Forbidden:
             self.logger.error(f"No permission to create SB channel")
@@ -415,8 +420,9 @@ class JJIBot(commands.Bot):
                             self.logger.error(f"Failed to log new soldier: {e}")
                 
                 elif was_soldier and not is_soldier:
-                    # Lost soldier role - no budget change (closed-loop economy)
-                    self.logger.info(f"Lost soldier: {after}")
+                    # Lost soldier role - deduct soldier value from budget
+                    await db.update_server_budget(-soldier_value)
+                    self.logger.info(f"Lost soldier: {after}, budget -{format_balance(soldier_value)}")
                     
                     # Log to recruit channel
                     log_channel_id = config.get("channels", {}).get("log_recruit")
@@ -435,6 +441,7 @@ class JJIBot(commands.Bot):
                                     value=f"-{format_balance(soldier_value)}",
                                     inline=True
                                 )
+                                embed.set_footer(text="Soldier value deducted from server budget")
                                 await channel.send(embed=embed)
                         except Exception as e:
                             self.logger.error(f"Failed to log soldier removal: {e}")
@@ -498,7 +505,7 @@ class JJIBot(commands.Bot):
                 self.logger.error(f"Failed to log member join: {e}")
     
     async def on_member_remove(self, member: discord.Member):
-        """Handle member leaving - remove soldier value from budget"""
+        """Handle member leaving - deduct soldier value if was soldier"""
         if member.bot:
             return
         
@@ -508,9 +515,9 @@ class JJIBot(commands.Bot):
         # Check if they had soldier role
         had_soldier_role = soldier_role_id and any(r.id == soldier_role_id for r in member.roles)
         
+        # If soldier left - deduct soldier value from budget
+        # This is symmetric: /accept adds soldier_value, leaving removes it
         if had_soldier_role:
-            # Deduct soldier value from budget (only when LEAVING server with role)
-            # Note: on_member_update handles role removal while staying on server
             economy = await db.get_server_economy()
             soldier_value = economy.soldier_value
             
@@ -536,6 +543,7 @@ class JJIBot(commands.Bot):
                             value=f"-{format_balance(economy.soldier_value)}",
                             inline=True
                         )
+                        embed.set_footer(text="Soldier value deducted from server budget")
                     await channel.send(embed=embed)
             except Exception as e:
                 self.logger.error(f"Failed to log member leave: {e}")
@@ -615,18 +623,21 @@ class JJIBot(commands.Bot):
                     except Exception:
                         pass  # If can't check, give benefit of doubt
 
-                # Determine rate based on role
+                # Determine rate based on highest-paying role
+                # Check all roles and select the one with maximum rate
+                role_rates = []
                 if user.is_officer:
-                    rate = officer_rate
-                    role_name = "Officer"
-                elif user.is_sergeant:
-                    rate = sergeant_rate
-                    role_name = "Sergeant"
-                elif user.is_soldier:
-                    rate = soldier_rate
-                    role_name = "Soldier"
-                else:
+                    role_rates.append((officer_rate, "Officer"))
+                if user.is_sergeant:
+                    role_rates.append((sergeant_rate, "Sergeant"))
+                if user.is_soldier:
+                    role_rates.append((soldier_rate, "Soldier"))
+                
+                if not role_rates:
                     continue  # No salary for non-role members
+                
+                # Select the role with maximum rate
+                rate, role_name = max(role_rates, key=lambda x: x[0])
 
                 # Check budget before paying
                 if remaining_budget < rate:
@@ -722,20 +733,22 @@ class JJIBot(commands.Bot):
                     self.logger.warning("Not enough budget for 10h PB bonus")
                     continue
                 
-                # Deduct from server budget first
-                # Pay bonus
-                await db.update_user_balance(
-                    officer.discord_id,
-                    bonus_amount,
-                    TransactionType.PB_10H_BONUS,
+                # Pay bonus atomically from budget (no tax on bonuses)
+                result = await db.pay_from_budget_atomic(
+                    discord_id=officer.discord_id,
+                    gross_amount=bonus_amount,
+                    net_amount=bonus_amount,  # No tax on bonus
+                    tax_amount=0,
+                    transaction_type=TransactionType.PB_10H_BONUS,
                     description=f"10h SB bonus for recruit"
                 )
                 
-                await db.add_rewards_paid(bonus_amount)  # This deducts from budget and tracks stats
-                await db.mark_10h_bonus_rewarded(log.id)
-                
-                self.logger.info(f"Paid 10h bonus to officer {officer.discord_id}: ${bonus_amount}")
-                metrics.track_transaction("pb_10h_bonus")
+                if result["success"]:
+                    await db.mark_10h_bonus_rewarded(log.id)
+                    self.logger.info(f"Paid 10h bonus to officer {officer.discord_id}: ${bonus_amount}")
+                    metrics.track_transaction("pb_10h_bonus")
+                else:
+                    self.logger.warning(f"Failed to pay 10h bonus: {result.get('error', 'Unknown')}")
     
     @pb_bonus_task.before_loop
     async def before_pb_bonus(self):

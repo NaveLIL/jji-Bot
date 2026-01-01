@@ -390,13 +390,20 @@ class BlackjackGame:
             if hand.is_surrendered:
                 self.results.append((HandResult.SURRENDER, -hand.bet / 2))
                 continue
-            if hand.is_bust:
+            
+            # Check bust FIRST - if value > 21, it's always a bust regardless of is_bust flag
+            if hand.is_bust or hand.value > 21:
                 loss = hand.bet * 2 if hand.is_doubled else hand.bet
                 self.results.append((HandResult.BUST, -loss))
                 continue
                 
             multiplier = 2 if hand.is_doubled else 1
             hand_val = hand.value
+            
+            # Safety check - should never happen but prevents 22+ from winning
+            if hand_val > 21:
+                self.results.append((HandResult.BUST, -hand.bet * multiplier))
+                continue
             
             if dealer_bust:
                 self.results.append((HandResult.WIN, hand.bet * multiplier))
@@ -775,43 +782,61 @@ class PvPBlackjackGame:
 
             if ha and hb:
                 # Both have a hand at this index -> compare head-to-head
+                # In PvP closed economy: winner takes loser's stake (no 1.5x bonus)
+                
                 # Bust rules
                 if ha.is_bust and hb.is_bust:
+                    # Both bust - both lose their stakes to budget
                     a_results.append((HandResult.BUST, -hand_base_bet(ha)))
                     b_results.append((HandResult.BUST, -hand_base_bet(hb)))
                     continue
 
                 if ha.is_bust and not hb.is_bust:
+                    # A busts, B wins A's stake
                     a_results.append((HandResult.LOSE, -hand_base_bet(ha)))
-                    b_results.append((HandResult.WIN, hand_base_bet(hb)))
+                    b_results.append((HandResult.WIN, hand_base_bet(ha)))  # B wins A's bet
                     continue
 
                 if hb.is_bust and not ha.is_bust:
-                    a_results.append((HandResult.WIN, hand_base_bet(ha)))
+                    # B busts, A wins B's stake
+                    a_results.append((HandResult.WIN, hand_base_bet(hb)))  # A wins B's bet
                     b_results.append((HandResult.LOSE, -hand_base_bet(hb)))
                     continue
 
-                # Blackjacks
+                # Blackjacks - in PvP no 1.5x bonus, just win opponent's stake
                 if ha.is_blackjack and hb.is_blackjack:
                     a_results.append((HandResult.PUSH, 0))
                     b_results.append((HandResult.PUSH, 0))
                     continue
                 if ha.is_blackjack and not hb.is_blackjack:
-                    a_results.append((HandResult.BLACKJACK, hand_base_bet(ha) * self.blackjack_payout))
+                    # A has BJ, wins B's stake (no 1.5x in PvP for closed economy)
+                    a_results.append((HandResult.BLACKJACK, hand_base_bet(hb)))  # A wins B's bet
                     b_results.append((HandResult.LOSE, -hand_base_bet(hb)))
                     continue
                 if hb.is_blackjack and not ha.is_blackjack:
+                    # B has BJ, wins A's stake (no 1.5x in PvP for closed economy)
                     a_results.append((HandResult.LOSE, -hand_base_bet(ha)))
-                    b_results.append((HandResult.BLACKJACK, hand_base_bet(hb) * self.blackjack_payout))
+                    b_results.append((HandResult.BLACKJACK, hand_base_bet(ha)))  # B wins A's bet
                     continue
 
-                # Regular comparison by value
-                if ha.value > hb.value:
-                    a_results.append((HandResult.WIN, hand_base_bet(ha)))
+                # Regular comparison by value - winner takes loser's stake
+                # SAFETY: Both hands should be <= 21 at this point (bust checked above)
+                a_val = ha.value
+                b_val = hb.value
+                
+                # Extra safety check - if somehow a hand is > 21 it should lose
+                if a_val > 21:
+                    a_results.append((HandResult.BUST, -hand_base_bet(ha)))
+                    b_results.append((HandResult.WIN, hand_base_bet(ha)))
+                elif b_val > 21:
+                    a_results.append((HandResult.WIN, hand_base_bet(hb)))
+                    b_results.append((HandResult.BUST, -hand_base_bet(hb)))
+                elif a_val > b_val:
+                    a_results.append((HandResult.WIN, hand_base_bet(hb)))  # A wins B's bet
                     b_results.append((HandResult.LOSE, -hand_base_bet(hb)))
-                elif ha.value < hb.value:
+                elif a_val < b_val:
                     a_results.append((HandResult.LOSE, -hand_base_bet(ha)))
-                    b_results.append((HandResult.WIN, hand_base_bet(hb)))
+                    b_results.append((HandResult.WIN, hand_base_bet(ha)))  # B wins A's bet
                 else:
                     a_results.append((HandResult.PUSH, 0))
                     b_results.append((HandResult.PUSH, 0))

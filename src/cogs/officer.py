@@ -95,21 +95,23 @@ class OfficerCog(commands.Cog):
         budget_before = economy.total_budget
         net_reward, tax = calculate_tax(accept_reward, economy.tax_rate)
         
-        # Give officer reward (after tax) - tax already deducted in net_reward
-        await db.update_user_balance(
-            interaction.user.id,
-            net_reward,
-            TransactionType.OFFICER_REWARD,
-            tax_amount=0,  # Tax already calculated in net_reward
+        # Atomically pay officer reward from budget
+        # Budget pays gross amount, officer receives net (after tax), tax stays in budget
+        result = await db.pay_from_budget_atomic(
+            discord_id=interaction.user.id,
+            gross_amount=accept_reward,
+            net_amount=net_reward,
+            tax_amount=tax,
+            transaction_type=TransactionType.OFFICER_REWARD,
             description=f"Recruitment reward for {recruit.display_name}"
         )
         
-        # Deduct from server budget (gross amount)
-        await db.add_rewards_paid(accept_reward)
-        
-        # Add tax to server budget
-        if tax > 0:
-            await db.add_taxes_collected(tax)
+        if not result["success"]:
+            await interaction.response.send_message(
+                f"❌ Failed to pay reward: {result.get('error', 'Unknown error')}",
+                ephemeral=True
+            )
+            return
         
         # Log recruitment reward
         officer_after = await db.get_or_create_user(interaction.user.id)

@@ -3,6 +3,7 @@ Economy Cog - Balance, transactions, case, pay commands
 """
 
 import random
+import asyncio
 from datetime import datetime, timedelta
 import discord
 from discord import app_commands
@@ -220,107 +221,156 @@ class EconomyCog(commands.Cog):
             hours = int(time_left.total_seconds() // 3600)
             minutes = int((time_left.total_seconds() % 3600) // 60)
             
-            await interaction.response.send_message(
-                f"⏳ Case on cooldown! Available in **{hours}h {minutes}m**",
-                ephemeral=True
+            embed = discord.Embed(
+                description=(
+                    "## ⏳ Case on Cooldown\n\n"
+                    f"**Available in:** `{hours}h {minutes}m`\n\n"
+                    "*Come back later for your daily reward!*"
+                ),
+                color=0x5865F2
             )
+            embed.set_author(name="📦 Daily Case", icon_url=interaction.user.display_avatar.url)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
         
-        # Record usage
+        # Record usage BEFORE rolling
         await db.record_case_use(interaction.user.id)
         
+        # Show opening animation
+        opening_embed = discord.Embed(
+            description=(
+                "## 📦 Opening Case...\n\n"
+                "🎁 **???** 🎁\n\n"
+                "*Rolling for reward...*"
+            ),
+            color=0xFEE75C
+        )
+        opening_embed.set_author(name=f"📦 {interaction.user.display_name}'s Case", icon_url=interaction.user.display_avatar.url)
+        await interaction.response.send_message(embed=opening_embed)
+        
+        # Small delay for suspense
+        await asyncio.sleep(1.5)
+        
         # Roll for reward
-        empty_chance = config.get("empty_chance", 99)
+        empty_chance = config.get("empty_chance", 30)
         roll = random.uniform(0, 100)
         
         if roll < empty_chance:
             # Empty case
-            reward = 0
-            result_text = "📦 **Empty!** Better luck next time!"
-            color = discord.Color.dark_gray()
-        else:
-            # Won something!
-            weights = config.get("reward_weights", {})
-            
-            # Weighted random selection
-            total_weight = sum(w.get("weight", 0) for w in weights.values())
-            rand = random.uniform(0, total_weight)
-            
-            current = 0
-            selected_range = [2, 5]  # Default
-            
-            for tier_data in weights.values():
-                current += tier_data.get("weight", 0)
-                if rand <= current:
-                    selected_range = tier_data.get("range", [2, 5])
-                    break
-            
-            reward = random.randint(selected_range[0], selected_range[1])
-            
-            # Apply tax
-            economy = await db.get_server_economy()
-            user_before = (await db.get_or_create_user(interaction.user.id)).balance
-            budget_before = economy.total_budget
-            net_reward, tax = calculate_tax(reward, economy.tax_rate)
-            
-            # Add to balance - tax already deducted in net_reward
-            await db.update_user_balance(
-                interaction.user.id,
-                net_reward,
-                TransactionType.CASE_REWARD,
-                tax_amount=0,  # Tax already calculated in net_reward
-                description="Case reward"
+            result_embed = discord.Embed(color=0x99AAB5)
+            result_embed.description = (
+                "## 📦 Empty Case\n\n"
+                "💨 *Nothing inside...*\n\n"
+                "> Better luck next time!\n"
+                "> The case was empty."
             )
-            
-            # Deduct gross reward from budget
-            await db.add_rewards_paid(reward)
-
-            if tax > 0:
-                await db.add_taxes_collected(tax)
-            
-            # Log case win
-            user_after = await db.get_or_create_user(interaction.user.id)
-            economy_after = await db.get_server_economy()
-            await economy_logger.log(
-                action=EconomyAction.CASE_WIN,
-                amount=net_reward,
-                user_id=interaction.user.id,
-                user_name=interaction.user.display_name,
-                before_balance=user_before,
-                after_balance=user_after.balance,
-                before_budget=budget_before,
-                after_budget=economy_after.total_budget,
-                description=f"Case reward: ${reward:,.2f} (gross)",
-                details={
-                    "Gross Reward": f"${reward:,.2f}",
-                    "Tax": f"${tax:,.2f}",
-                    "Net Reward": f"${net_reward:,.2f}"
-                },
-                source="Case Command"
-            )
-            
-            if reward >= 10:
-                result_text = f"# 🎉 JACKPOT!\n\n**You won {format_balance(reward)}!**\nAfter tax ({economy.tax_rate:.0f}%): `{format_balance(net_reward)}`"
-                color = 0xFEE75C  # Gold
-            else:
-                result_text = f"## 🎁 Winner!\n\n**You won {format_balance(reward)}!**\nAfter tax: `{format_balance(net_reward)}`"
-                color = 0x57F287  # Green
-            
-            metrics.track_transaction("case_win")
+            result_embed.set_author(name=f"📦 {interaction.user.display_name}'s Case", icon_url=interaction.user.display_avatar.url)
+            result_embed.set_footer(text=f"⏰ Next case in {cooldown_hours}h")
+            await interaction.edit_original_response(embed=result_embed)
+            return
         
-        embed = discord.Embed(
-            description=result_text,
-            color=color
+        # Won something!
+        weights = config.get("reward_weights", {})
+        
+        # Weighted random selection
+        total_weight = sum(w.get("weight", 0) for w in weights.values())
+        rand = random.uniform(0, total_weight)
+        
+        current = 0
+        selected_range = [1, 5]  # Default
+        tier_name = "low"
+        
+        for name, tier_data in weights.items():
+            current += tier_data.get("weight", 0)
+            if rand <= current:
+                selected_range = tier_data.get("range", [1, 5])
+                tier_name = name
+                break
+        
+        reward = random.randint(selected_range[0], selected_range[1])
+        
+        # Apply tax
+        economy = await db.get_server_economy()
+        net_reward, tax = calculate_tax(reward, economy.tax_rate)
+        
+        # Pay reward atomically from budget
+        result = await db.pay_from_budget_atomic(
+            discord_id=interaction.user.id,
+            gross_amount=reward,
+            net_amount=net_reward,
+            tax_amount=tax,
+            transaction_type=TransactionType.CASE_REWARD,
+            description="Case reward"
         )
         
-        # Add case visual
-        if reward == 0:
-            embed.set_thumbnail(url="https://cdn.discordapp.com/emojis/1234567890.png")  # Empty box
+        if not result["success"]:
+            error_embed = discord.Embed(
+                description=(
+                    "## ❌ Reward Failed\n\n"
+                    f"> {result.get('error', 'Server budget depleted')}\n"
+                    "> Please try again later."
+                ),
+                color=0xED4245
+            )
+            await interaction.edit_original_response(embed=error_embed)
+            return
         
-        embed.set_author(name="📦 Daily Case", icon_url=interaction.user.display_avatar.url)
-        embed.set_footer(text=f"⏰ Next case in {cooldown_hours}h • 💎 Developed by NaveL for JJI in 2025")
+        # Log case win
+        await economy_logger.log(
+            action=EconomyAction.CASE_WIN,
+            amount=net_reward,
+            user_id=interaction.user.id,
+            user_name=interaction.user.display_name,
+            before_balance=result["before_balance"],
+            after_balance=result["after_balance"],
+            before_budget=result["before_budget"],
+            after_budget=result["after_budget"],
+            description=f"Case reward: ${reward:,.2f} (gross)",
+            details={
+                "Gross Reward": f"${reward:,.2f}",
+                "Tax": f"${tax:,.2f}",
+                "Net Reward": f"${net_reward:,.2f}"
+            },
+            source="Case Command"
+        )
         
-        await interaction.response.send_message(embed=embed)
+        # Build result embed based on tier
+        if tier_name == "high" or reward >= 20:
+            # JACKPOT!
+            result_embed = discord.Embed(color=0xFEE75C)
+            result_embed.description = (
+                "# 🎉 JACKPOT!\n\n"
+                f"## 💎 ${reward:,.0f}\n\n"
+                f"**Gross:** `{format_balance(reward)}`\n"
+                f"**Tax ({economy.tax_rate:.0f}%):** `-{format_balance(tax)}`\n"
+                f"**Net:** `{format_balance(net_reward)}`\n\n"
+                f"───────────────────\n"
+                f"💰 **New Balance:** `{format_balance(result['after_balance'])}`"
+            )
+        elif tier_name == "medium" or reward >= 10:
+            # Medium win
+            result_embed = discord.Embed(color=0x57F287)
+            result_embed.description = (
+                "## 🎁 Winner!\n\n"
+                f"### 💵 ${reward:,.0f}\n\n"
+                f"**Gross:** `{format_balance(reward)}`\n"
+                f"**Tax:** `-{format_balance(tax)}`\n"
+                f"**Net:** `{format_balance(net_reward)}`"
+            )
+        else:
+            # Low win
+            result_embed = discord.Embed(color=0x3498DB)
+            result_embed.description = (
+                "## 🎁 Reward!\n\n"
+                f"### 💰 ${reward:,.0f}\n\n"
+                f"**You won:** `{format_balance(net_reward)}`"
+            )
+        
+        result_embed.set_author(name=f"📦 {interaction.user.display_name}'s Case", icon_url=interaction.user.display_avatar.url)
+        result_embed.set_footer(text=f"⏰ Next case in {cooldown_hours}h • Balance: {format_balance(result['after_balance'])}")
+        
+        metrics.track_transaction("case_win")
+        await interaction.edit_original_response(embed=result_embed)
     
     @app_commands.command(name="daily", description="Claim your daily reward")
     @rate_limited("economy", limit=1, window=60)
