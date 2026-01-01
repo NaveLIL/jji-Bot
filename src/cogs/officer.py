@@ -69,7 +69,7 @@ class OfficerCog(commands.Cog):
             )
             return
         
-        # Give soldier role
+        # Give soldier role and remove guest role
         if soldier_role_id:
             soldier_role = interaction.guild.get_role(soldier_role_id)
             if soldier_role:
@@ -81,6 +81,16 @@ class OfficerCog(commands.Cog):
                         ephemeral=True
                     )
                     return
+        
+        # Remove guest role if exists
+        guest_role_id = config.get("roles", {}).get("guest")
+        if guest_role_id:
+            guest_role = interaction.guild.get_role(guest_role_id)
+            if guest_role and guest_role in recruit.roles:
+                try:
+                    await recruit.remove_roles(guest_role, reason=f"Promoted to soldier by {interaction.user.display_name}")
+                except discord.Forbidden:
+                    pass  # Non-critical, continue anyway
         
         # Update recruit's database entry
         await db.update_user_roles(recruit.id, is_soldier=True)

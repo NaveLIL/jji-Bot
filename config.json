@@ -16,7 +16,8 @@
         "sergeant": 1442156606799220970,
         "officer": 1442156605142470796,
         "admin": 1442156600415486062,
-        "guest_admin": 0
+        "guest_admin": 0,
+        "guest": 1442156660561940590
     },
     "economy": {
         "starting_budget": 50000,
