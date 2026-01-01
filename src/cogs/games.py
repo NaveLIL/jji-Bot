@@ -124,8 +124,8 @@ class PvPInviteView(discord.ui.View):
 class EnhancedBlackjackView(discord.ui.View):
     """Beautiful interactive blackjack game view with Play Again"""
     
-    def __init__(self, game: BlackjackGame, cog: "GamesCog", bet: float, timeout: float = 300):
-        super().__init__(timeout=timeout)
+    def __init__(self, game: BlackjackGame, cog: "GamesCog", bet: float, timeout: float = None):
+        super().__init__(timeout=timeout)  # None = no timeout
         self.game = game
         self.cog = cog
         self.bet = bet
