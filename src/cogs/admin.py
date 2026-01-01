@@ -298,6 +298,26 @@ class TaxRateModal(discord.ui.Modal, title="Set Tax Rate"):
                 "❌ Invalid number!",
                 ephemeral=True
             )
+        except Exception as e:
+            import logging
+            logging.error(f"TaxRateModal error: {e}", exc_info=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"❌ Error: {str(e)}",
+                    ephemeral=True
+                )
+    
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        import logging
+        logging.error(f"TaxRateModal on_error: {error}", exc_info=True)
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"❌ An error occurred: {str(error)}",
+                    ephemeral=True
+                )
+        except Exception:
+            pass
 
 
 class SoldierValueModal(discord.ui.Modal, title="Set Soldier Value"):
@@ -338,6 +358,26 @@ class SoldierValueModal(discord.ui.Modal, title="Set Soldier Value"):
                 "❌ Invalid number!",
                 ephemeral=True
             )
+        except Exception as e:
+            import logging
+            logging.error(f"SoldierValueModal error: {e}", exc_info=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"❌ Error: {str(e)}",
+                    ephemeral=True
+                )
+    
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        import logging
+        logging.error(f"SoldierValueModal on_error: {error}", exc_info=True)
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"❌ An error occurred: {str(error)}",
+                    ephemeral=True
+                )
+        except Exception:
+            pass
 
 
 class PrimeTimeModal(discord.ui.Modal, title="Set Prime Time Hours"):
@@ -380,6 +420,26 @@ class PrimeTimeModal(discord.ui.Modal, title="Set Prime Time Hours"):
                 "❌ Invalid number!",
                 ephemeral=True
             )
+        except Exception as e:
+            import logging
+            logging.error(f"PrimeTimeModal error: {e}", exc_info=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"❌ Error: {str(e)}",
+                    ephemeral=True
+                )
+    
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        import logging
+        logging.error(f"PrimeTimeModal on_error: {error}", exc_info=True)
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"❌ An error occurred: {str(error)}",
+                    ephemeral=True
+                )
+        except Exception:
+            pass
 
 
 class SalaryModal(discord.ui.Modal, title="Set Salary Rates"):
@@ -481,6 +541,26 @@ class SalaryModal(discord.ui.Modal, title="Set Salary Rates"):
                 "❌ Invalid numbers!",
                 ephemeral=True
             )
+        except Exception as e:
+            import logging
+            logging.error(f"SalaryModal error: {e}", exc_info=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"❌ Error: {str(e)}",
+                    ephemeral=True
+                )
+    
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        import logging
+        logging.error(f"SalaryModal on_error: {error}", exc_info=True)
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"❌ An error occurred: {str(error)}",
+                    ephemeral=True
+                )
+        except Exception:
+            pass
 
 
 class BudgetModal(discord.ui.Modal, title="Set Server Budget"):
@@ -548,6 +628,26 @@ class BudgetModal(discord.ui.Modal, title="Set Server Budget"):
                 "❌ Invalid number!",
                 ephemeral=True
             )
+        except Exception as e:
+            import logging
+            logging.error(f"BudgetModal error: {e}", exc_info=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"❌ Error: {str(e)}",
+                    ephemeral=True
+                )
+    
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        import logging
+        logging.error(f"BudgetModal on_error: {error}", exc_info=True)
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"❌ An error occurred: {str(error)}",
+                    ephemeral=True
+                )
+        except Exception:
+            pass
 
 
 class AddBudgetModal(discord.ui.Modal, title="Add to Server Budget"):
@@ -596,6 +696,26 @@ class AddBudgetModal(discord.ui.Modal, title="Add to Server Budget"):
                 "❌ Invalid number!",
                 ephemeral=True
             )
+        except Exception as e:
+            import logging
+            logging.error(f"AddBudgetModal error: {e}", exc_info=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"❌ Error: {str(e)}",
+                    ephemeral=True
+                )
+    
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        import logging
+        logging.error(f"AddBudgetModal on_error: {error}", exc_info=True)
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"❌ An error occurred: {str(error)}",
+                    ephemeral=True
+                )
+        except Exception:
+            pass
 
 
 # ==================== ECONOMY PANEL VIEW ====================

@@ -63,7 +63,9 @@ class DatabaseService:
         async with self.async_session() as session:
             try:
                 yield session
-                await session.commit()
+                # Check if there are pending changes before committing
+                if session.new or session.dirty or session.deleted:
+                    await session.commit()
             except Exception:
                 await session.rollback()
                 raise
@@ -471,12 +473,12 @@ class DatabaseService:
             
             if economy:
                 economy.tax_rate = max(0, min(100, rate))
-                await session.commit()
+                # commit is handled by context manager
     
     async def set_soldier_value(self, value: float) -> Tuple[float, float, int]:
         """Set soldier value and recalculate budget. Returns (old_value, new_value, soldier_count)"""
         async with self.session() as session:
-            result = await session.execute(select(ServerEconomy).with_for_update())
+            result = await session.execute(select(ServerEconomy))
             economy = result.scalar_one_or_none()
             
             if economy:
@@ -488,16 +490,10 @@ class DatabaseService:
                 )
                 soldier_count = soldier_count_result.scalar() or 0
                 
-                # Calculate budget difference (no longer adjust budget - closed-loop economy)
-                # old_soldier_contribution = old_value * soldier_count
-                # new_soldier_contribution = value * soldier_count
-                # budget_diff = new_soldier_contribution - old_soldier_contribution
-                
                 # Update economy
                 economy.soldier_value = value
-                # economy.total_budget += budget_diff
                 
-                await session.commit()
+                # commit is handled by context manager
                 return old_value, value, soldier_count
             
             return 0, value, 0

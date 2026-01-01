@@ -14,7 +14,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-      - ./config.json:/app/config.json:ro
+      - ./config.json:/app/config.json
       - ./src:/app/src:ro
     depends_on:
       - redis
