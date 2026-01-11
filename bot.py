@@ -340,8 +340,8 @@ class JJIBot(commands.Bot):
                         ground_count = len(ground_channel.members)
                         air_count = len(air_channel.members)
                         total_count = ground_count + air_count
-                        max_squad = 16  # Max squad size (8 per channel)
-                        needed = max_squad - total_count
+                        max_squad = 8  # Max squad size (total for both channels)
+                        needed = max(0, max_squad - total_count)
                         
                         embed = discord.Embed(
                             title="📢 SQUADRON ASSEMBLY!",
@@ -360,7 +360,7 @@ class JJIBot(commands.Bot):
                         )
                         embed.add_field(
                             name="👥 Current Squadron",
-                            value=f"🛡️ Ground: `{ground_count}/8`\n✈️ Air: `{air_count}/8`\n**Total:** `{total_count}/{max_squad}` — need {needed} more!",
+                            value=f"🛡️ Ground: `{ground_count}`\n✈️ Air: `{air_count}`\n**Total:** `{total_count}/{max_squad}` — need {needed} more!",
                             inline=False
                         )
                         embed.add_field(
