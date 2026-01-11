@@ -236,8 +236,14 @@ class JJIBot(commands.Bot):
             # Delete if both paired channels are empty (or old format single channel is empty)
             if ground_channel and air_channel:
                 if len(ground_channel.members) == 0 and len(air_channel.members) == 0:
-                    await ground_channel.delete(reason="Squadron Battle ended - both channels empty")
-                    await air_channel.delete(reason="Squadron Battle ended - both channels empty")
+                    try:
+                        await ground_channel.delete(reason="Squadron Battle ended - both channels empty")
+                    except discord.NotFound:
+                        pass  # Already deleted
+                    try:
+                        await air_channel.delete(reason="Squadron Battle ended - both channels empty")
+                    except discord.NotFound:
+                        pass  # Already deleted
                     self.logger.info(f"Deleted empty SB #{sb_num} channels (Ground + Air)")
                     
                     # Clean up tracker
@@ -247,11 +253,16 @@ class JJIBot(commands.Bot):
                         del self.sb_channels[air_channel.id]
             elif old_format_channel and len(old_format_channel.members) == 0:
                 # Old format single channel
-                await old_format_channel.delete(reason="Squadron Battle ended - channel empty")
+                try:
+                    await old_format_channel.delete(reason="Squadron Battle ended - channel empty")
+                except discord.NotFound:
+                    pass  # Already deleted
                 self.logger.info(f"Deleted empty SB channel: {old_format_channel.name}")
                 if old_format_channel.id in self.sb_channels:
                     del self.sb_channels[old_format_channel.id]
                     
+        except discord.NotFound:
+            pass  # Channel already deleted
         except Exception as e:
             self.logger.error(f"Failed to delete SB channel: {e}")
     
@@ -895,30 +906,73 @@ class JJIBot(commands.Bot):
             max_squad = 8
             now = datetime.now(timezone.utc)
             
-            # Find all active SB channels
-            sb_channels = [ch for ch in guild.voice_channels if ch.name.startswith("Squadron Battle #")]
+            # Find all active SB channels (new format: "SB #N Ground/Air")
+            # Group them by squadron number
+            squadrons = {}  # {num: {"ground": channel, "air": channel}}
             
-            for channel in sb_channels:
-                member_count = len(channel.members)
+            for ch in guild.voice_channels:
+                if ch.name.startswith("SB #"):
+                    parts = ch.name.replace("SB #", "").split()
+                    if len(parts) >= 2:
+                        try:
+                            num = int(parts[0])
+                            channel_type = parts[1].lower()  # "ground" or "air"
+                            if num not in squadrons:
+                                squadrons[num] = {"ground": None, "air": None, "members": 0}
+                            squadrons[num][channel_type] = ch
+                            squadrons[num]["members"] += len(ch.members)
+                        except ValueError:
+                            pass
+                # Also support old format for backwards compatibility
+                elif ch.name.startswith("Squadron Battle #"):
+                    try:
+                        num = int(ch.name.replace("Squadron Battle #", ""))
+                        if num not in squadrons:
+                            squadrons[num] = {"ground": ch, "air": None, "members": len(ch.members)}
+                    except ValueError:
+                        pass
+            
+            for squad_num, squad_info in squadrons.items():
+                member_count = squad_info["members"]
+                ground_ch = squad_info.get("ground")
+                air_ch = squad_info.get("air")
                 
-                # Skip empty channels (will be deleted by voice_state_update)
-                if member_count == 0:
-                    if channel.id in self.sb_channels:
-                        del self.sb_channels[channel.id]
+                # Get the main channel for reference (prefer ground)
+                main_channel = ground_ch or air_ch
+                if not main_channel:
                     continue
                 
+                # Skip empty squadrons (will be deleted by voice_state_update)
+                if member_count == 0:
+                    # Clean up tracking
+                    if ground_ch and ground_ch.id in self.sb_channels:
+                        del self.sb_channels[ground_ch.id]
+                    if air_ch and air_ch.id in self.sb_channels:
+                        del self.sb_channels[air_ch.id]
+                    continue
+                
+                # Use ground channel id for tracking (or air if no ground)
+                tracking_id = ground_ch.id if ground_ch else air_ch.id
+                
                 # Get or create channel tracking
-                if channel.id not in self.sb_channels:
-                    # Find commander (first member or member with sergeant role)
-                    commander = channel.members[0] if channel.members else None
-                    self.sb_channels[channel.id] = {
+                if tracking_id not in self.sb_channels:
+                    # Find commander (first member)
+                    all_members = []
+                    if ground_ch:
+                        all_members.extend(ground_ch.members)
+                    if air_ch:
+                        all_members.extend(air_ch.members)
+                    commander = all_members[0] if all_members else None
+                    
+                    self.sb_channels[tracking_id] = {
                         "last_ping": now,
                         "commander_id": commander.id if commander else None,
-                        "last_status": "initial"
+                        "last_status": "initial",
+                        "squad_num": squad_num
                     }
                     continue  # Skip first check, let initial message work
                 
-                tracking = self.sb_channels[channel.id]
+                tracking = self.sb_channels[tracking_id]
                 last_ping = tracking.get("last_ping", now)
                 time_since_ping = (now - last_ping).total_seconds() / 60  # in minutes
                 
@@ -929,14 +983,20 @@ class JJIBot(commands.Bot):
                     needed = max_squad - member_count
                     
                     if time_since_ping >= ping_interval:
+                        # Build channel mentions
+                        if ground_ch and air_ch:
+                            channels_value = f"🛡️ {ground_ch.mention}\n✈️ {air_ch.mention}"
+                        else:
+                            channels_value = main_channel.mention
+                        
                         embed = discord.Embed(
                             title="📢 SOLDIERS NEEDED!",
-                            description=f"**Squadron #{channel.name.split('#')[1]}** needs reinforcements!",
+                            description=f"**Squadron #{squad_num}** needs reinforcements!",
                             color=0xFF4444
                         )
                         embed.add_field(
-                            name="🔊 Voice Channel",
-                            value=channel.mention,
+                            name="🔊 Voice Channels",
+                            value=channels_value,
                             inline=True
                         )
                         embed.add_field(
@@ -954,28 +1014,34 @@ class JJIBot(commands.Bot):
                             value="Join now and earn salary!",
                             inline=False
                         )
-                        embed.set_footer(text="Join the battle! • Squadron System")
+                        embed.set_footer(text="Join Ground for tanks or Air for aviation! • Squadron System")
                         
                         ping_content = f"<@&{soldier_role_id}>" if soldier_role_id else ""
                         await ping_channel.send(content=ping_content, embed=embed)
                         
                         tracking["last_ping"] = now
                         tracking["last_status"] = "recruiting"
-                        self.logger.debug(f"SB ping: {channel.name} needs {needed} more")
+                        self.logger.debug(f"SB ping: Squadron #{squad_num} needs {needed} more")
                 
                 else:
                     # Full squad - ping every 60 minutes (1 hour) for standby
                     ping_interval = 60
                     
                     if time_since_ping >= ping_interval:
+                        # Build channel mentions
+                        if ground_ch and air_ch:
+                            channels_value = f"🛡️ {ground_ch.mention}\n✈️ {air_ch.mention}"
+                        else:
+                            channels_value = main_channel.mention
+                        
                         embed = discord.Embed(
                             title="✅ SQUADRON FULL - STANDBY!",
-                            description=f"**Squadron #{channel.name.split('#')[1]}** is fully staffed!",
+                            description=f"**Squadron #{squad_num}** is fully staffed!",
                             color=0x00FF00
                         )
                         embed.add_field(
-                            name="🔊 Voice Channel",
-                            value=channel.mention,
+                            name="🔊 Voice Channels",
+                            value=channels_value,
                             inline=True
                         )
                         embed.add_field(
@@ -995,10 +1061,16 @@ class JJIBot(commands.Bot):
                         
                         tracking["last_ping"] = now
                         tracking["last_status"] = "full"
-                        self.logger.debug(f"SB standby: {channel.name} is full")
+                        self.logger.debug(f"SB standby: Squadron #{squad_num} is full")
             
             # Clean up tracking for deleted channels
-            active_ids = {ch.id for ch in sb_channels}
+            active_ids = set()
+            for squad_info in squadrons.values():
+                if squad_info.get("ground"):
+                    active_ids.add(squad_info["ground"].id)
+                if squad_info.get("air"):
+                    active_ids.add(squad_info["air"].id)
+            
             for channel_id in list(self.sb_channels.keys()):
                 if channel_id not in active_ids:
                     del self.sb_channels[channel_id]
