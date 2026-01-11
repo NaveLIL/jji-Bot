@@ -2183,6 +2183,71 @@ class DatabaseService:
             result = await session.execute(select(func.sum(User.balance)))
             return result.scalar() or 0.0
     
+    async def get_24h_budget_change(self) -> float:
+        """Get budget change over the last 24 hours from transactions"""
+        async with self.session() as session:
+            cutoff = datetime.utcnow() - timedelta(hours=24)
+            
+            # Budget increases: taxes, game losses, fines, confiscations
+            budget_in_types = [
+                TransactionType.TAX, 
+                TransactionType.GAME_LOSS, 
+                TransactionType.FINE, 
+                TransactionType.CONFISCATE,
+                TransactionType.MUTE_PENALTY
+            ]
+            
+            in_result = await session.execute(
+                select(func.sum(func.abs(Transaction.amount)))
+                .where(
+                    Transaction.transaction_type.in_(budget_in_types),
+                    Transaction.timestamp > cutoff
+                )
+            )
+            budget_in = in_result.scalar() or 0.0
+            
+            # Also add tax amounts collected
+            tax_result = await session.execute(
+                select(func.sum(Transaction.tax_amount))
+                .where(Transaction.timestamp > cutoff)
+            )
+            tax_collected = tax_result.scalar() or 0.0
+            
+            # Budget decreases: salaries, rewards, game wins, case rewards, admin adds
+            budget_out_types = [
+                TransactionType.SALARY,
+                TransactionType.MASTER_BONUS,
+                TransactionType.GAME_WIN,
+                TransactionType.CASE_REWARD,
+                TransactionType.OFFICER_REWARD,
+                TransactionType.PB_10H_BONUS,
+                TransactionType.ADMIN_ADD
+            ]
+            
+            out_result = await session.execute(
+                select(func.sum(Transaction.amount))
+                .where(
+                    Transaction.transaction_type.in_(budget_out_types),
+                    Transaction.timestamp > cutoff
+                )
+            )
+            budget_out = out_result.scalar() or 0.0
+            
+            # Net change: in - out + taxes
+            return budget_in + tax_collected - budget_out
+    
+    async def get_24h_balance_change(self) -> float:
+        """Get total user balance change over the last 24 hours"""
+        async with self.session() as session:
+            cutoff = datetime.utcnow() - timedelta(hours=24)
+            
+            # Sum all balance changes (amount - tax_amount for each transaction)
+            result = await session.execute(
+                select(func.sum(Transaction.amount - Transaction.tax_amount))
+                .where(Transaction.timestamp > cutoff)
+            )
+            return result.scalar() or 0.0
+    
     async def get_recent_transactions(self, limit: int = 10) -> List[Transaction]:
         """Get recent transactions"""
         async with self.session() as session:

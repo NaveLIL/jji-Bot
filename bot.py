@@ -163,14 +163,9 @@ class JJIBot(commands.Bot):
         config = self.config
         master_channel_id = config.get("channels", {}).get("master_voice")
         
-        # Check if user left a temp SB channel - delete if empty
-        if before.channel and before.channel.name.startswith("Squadron Battle #"):
-            if len(before.channel.members) == 0:
-                try:
-                    await before.channel.delete(reason="Squadron Battle ended - channel empty")
-                    self.logger.info(f"Deleted empty SB channel: {before.channel.name}")
-                except Exception as e:
-                    self.logger.error(f"Failed to delete SB channel: {e}")
+        # Check if user left a temp SB channel - delete paired channels if both empty
+        if before.channel and (before.channel.name.startswith("SB #") or before.channel.name.startswith("Squadron Battle #")):
+            await self._check_and_delete_sb_channels(before.channel)
         
         # User left voice completely
         if before.channel and not after.channel:
@@ -190,14 +185,9 @@ class JJIBot(commands.Bot):
         
         # User switched channels
         elif before.channel and after.channel and before.channel.id != after.channel.id:
-            # Check if old channel was temp SB and now empty
-            if before.channel.name.startswith("Squadron Battle #"):
-                if len(before.channel.members) == 0:
-                    try:
-                        await before.channel.delete(reason="Squadron Battle ended - channel empty")
-                        self.logger.info(f"Deleted empty SB channel: {before.channel.name}")
-                    except Exception as e:
-                        self.logger.error(f"Failed to delete SB channel: {e}")
+            # Check if old channel was temp SB - delete paired channels if both empty
+            if before.channel.name.startswith("SB #") or before.channel.name.startswith("Squadron Battle #"):
+                await self._check_and_delete_sb_channels(before.channel)
             
             # End old session
             duration = await db.end_voice_session(member.id)
@@ -212,8 +202,61 @@ class JJIBot(commands.Bot):
             if is_master:
                 await self._handle_master_channel_join(member, after.channel)
     
+    async def _check_and_delete_sb_channels(self, channel: discord.VoiceChannel):
+        """Check and delete paired SB channels if both are empty"""
+        try:
+            # Extract squadron number from channel name
+            name = channel.name
+            if name.startswith("SB #"):
+                # New format: "SB #1 Ground" or "SB #1 Air"
+                parts = name.replace("SB #", "").split()
+                if len(parts) >= 1:
+                    sb_num = parts[0]
+            elif name.startswith("Squadron Battle #"):
+                # Old format compatibility
+                sb_num = name.replace("Squadron Battle #", "").strip()
+            else:
+                return
+            
+            guild = channel.guild
+            
+            # Find paired channels (Ground and Air with same number)
+            ground_channel = None
+            air_channel = None
+            old_format_channel = None
+            
+            for ch in guild.voice_channels:
+                if ch.name == f"SB #{sb_num} Ground":
+                    ground_channel = ch
+                elif ch.name == f"SB #{sb_num} Air":
+                    air_channel = ch
+                elif ch.name == f"Squadron Battle #{sb_num}":
+                    old_format_channel = ch
+            
+            # Delete if both paired channels are empty (or old format single channel is empty)
+            if ground_channel and air_channel:
+                if len(ground_channel.members) == 0 and len(air_channel.members) == 0:
+                    await ground_channel.delete(reason="Squadron Battle ended - both channels empty")
+                    await air_channel.delete(reason="Squadron Battle ended - both channels empty")
+                    self.logger.info(f"Deleted empty SB #{sb_num} channels (Ground + Air)")
+                    
+                    # Clean up tracker
+                    if ground_channel.id in self.sb_channels:
+                        del self.sb_channels[ground_channel.id]
+                    if air_channel.id in self.sb_channels:
+                        del self.sb_channels[air_channel.id]
+            elif old_format_channel and len(old_format_channel.members) == 0:
+                # Old format single channel
+                await old_format_channel.delete(reason="Squadron Battle ended - channel empty")
+                self.logger.info(f"Deleted empty SB channel: {old_format_channel.name}")
+                if old_format_channel.id in self.sb_channels:
+                    del self.sb_channels[old_format_channel.id]
+                    
+        except Exception as e:
+            self.logger.error(f"Failed to delete SB channel: {e}")
+    
     async def _handle_master_channel_join(self, member: discord.Member, master_channel: discord.VoiceChannel):
-        """Handle when someone joins master channel - create SB channel for sergeants"""
+        """Handle when someone joins master channel - create paired SB channels (Ground + Air) for sergeants"""
         config = self.config
         
         # Check if user has sergeant role (from Discord, not just DB flag)
@@ -234,39 +277,58 @@ class JJIBot(commands.Bot):
             self.logger.debug(f"{member} joined master but not authorized to create SB channel")
             return
         
-        self.logger.info(f"{member} authorized - creating SB channel...")
+        self.logger.info(f"{member} authorized - creating SB channels...")
         
-        # Find next available SB number
+        # Find next available SB number (check both old and new format)
         guild = member.guild
-        existing_sb = [ch for ch in guild.voice_channels if ch.name.startswith("Squadron Battle #")]
-        sb_numbers = []
-        for ch in existing_sb:
-            try:
-                num = int(ch.name.replace("Squadron Battle #", ""))
-                sb_numbers.append(num)
-            except ValueError:
-                pass
+        sb_numbers = set()
+        
+        for ch in guild.voice_channels:
+            # New format: "SB #1 Ground" or "SB #1 Air"
+            if ch.name.startswith("SB #"):
+                try:
+                    parts = ch.name.replace("SB #", "").split()
+                    if parts:
+                        num = int(parts[0])
+                        sb_numbers.add(num)
+                except ValueError:
+                    pass
+            # Old format: "Squadron Battle #1"
+            elif ch.name.startswith("Squadron Battle #"):
+                try:
+                    num = int(ch.name.replace("Squadron Battle #", ""))
+                    sb_numbers.add(num)
+                except ValueError:
+                    pass
         
         next_num = 1
         while next_num in sb_numbers:
             next_num += 1
         
-        # Create new SB channel cloning master channel's permissions
+        # Create new paired SB channels cloning master channel's permissions
         try:
-            # Clone the master channel with same permissions
-            new_channel = await master_channel.clone(
-                name=f"Squadron Battle #{next_num}",
-                reason=f"Squadron Battle created by {member.display_name}"
+            # Create Ground channel (🛡️ Tanks)
+            ground_channel = await master_channel.clone(
+                name=f"SB #{next_num} Ground",
+                reason=f"Squadron Battle Ground channel created by {member.display_name}"
+            )
+            
+            # Create Air channel (✈️ Aviation)
+            air_channel = await master_channel.clone(
+                name=f"SB #{next_num} Air",
+                reason=f"Squadron Battle Air channel created by {member.display_name}"
             )
             
             # Move to same category as master
             if master_channel.category:
-                await new_channel.edit(category=master_channel.category, position=master_channel.position + next_num)
+                base_position = master_channel.position + (next_num * 2)
+                await ground_channel.edit(category=master_channel.category, position=base_position)
+                await air_channel.edit(category=master_channel.category, position=base_position + 1)
             
-            # Move the sergeant to the new channel
-            await member.move_to(new_channel, reason="Moved to new Squadron Battle channel")
+            # Move the sergeant to the ground channel by default
+            await member.move_to(ground_channel, reason="Moved to new Squadron Battle Ground channel")
             
-            self.logger.info(f"Created SB channel #{next_num} by {member}")
+            self.logger.info(f"Created SB #{next_num} channels (Ground + Air) by {member}")
             
             # Ping in sergeant channel with recruitment message
             ping_channel_id = config.get("channels", {}).get("ping_sergeant")
@@ -274,14 +336,16 @@ class JJIBot(commands.Bot):
                 try:
                     channel = self.get_channel(ping_channel_id)
                     if channel:
-                        # Count current members in the new channel
-                        current_count = len(new_channel.members)
-                        max_squad = 8  # Max squad size
-                        needed = max_squad - current_count
+                        # Count current members across both channels
+                        ground_count = len(ground_channel.members)
+                        air_count = len(air_channel.members)
+                        total_count = ground_count + air_count
+                        max_squad = 16  # Max squad size (8 per channel)
+                        needed = max_squad - total_count
                         
                         embed = discord.Embed(
                             title="📢 SQUADRON ASSEMBLY!",
-                            description=f"**Squadron #{next_num}** is looking for soldiers!",
+                            description=f"**Squadron #{next_num}** is forming up!",
                             color=0xFF6600
                         )
                         embed.add_field(
@@ -290,13 +354,13 @@ class JJIBot(commands.Bot):
                             inline=True
                         )
                         embed.add_field(
-                            name="🔊 Voice Channel",
-                            value=new_channel.mention,
+                            name="🔊 Voice Channels",
+                            value=f"🛡️ {ground_channel.mention}\n✈️ {air_channel.mention}",
                             inline=True
                         )
                         embed.add_field(
                             name="👥 Current Squadron",
-                            value=f"`{current_count}/{max_squad}` — need {needed} more!",
+                            value=f"🛡️ Ground: `{ground_count}/8`\n✈️ Air: `{air_count}/8`\n**Total:** `{total_count}/{max_squad}` — need {needed} more!",
                             inline=False
                         )
                         embed.add_field(
@@ -304,7 +368,7 @@ class JJIBot(commands.Bot):
                             value="Earn salary while playing in Squadron Battles!",
                             inline=False
                         )
-                        embed.set_footer(text="Join the voice channel to participate! • JJI Squadron System")
+                        embed.set_footer(text="Join Ground for tanks or Air for aviation! • JJI Squadron System")
                         
                         # Ping soldier role if configured
                         soldier_role_id = config.get("roles", {}).get("soldier")
@@ -312,11 +376,22 @@ class JJIBot(commands.Bot):
                         
                         await channel.send(content=ping_content, embed=embed)
                         
-                        # Register channel in tracker to avoid duplicate ping
-                        self.sb_channels[new_channel.id] = {
+                        # Register channels in tracker
+                        self.sb_channels[ground_channel.id] = {
                             "last_ping": datetime.now(timezone.utc),
                             "commander_id": member.id,
-                            "last_status": "initial"
+                            "last_status": "initial",
+                            "squad_num": next_num,
+                            "type": "ground",
+                            "paired_id": air_channel.id
+                        }
+                        self.sb_channels[air_channel.id] = {
+                            "last_ping": datetime.now(timezone.utc),
+                            "commander_id": member.id,
+                            "last_status": "initial",
+                            "squad_num": next_num,
+                            "type": "air",
+                            "paired_id": ground_channel.id
                         }
                 except Exception as e:
                     self.logger.error(f"Failed to send SB ping: {e}")
@@ -354,9 +429,9 @@ class JJIBot(commands.Bot):
                     self.logger.warning(f"Failed to pay SB bonus to {member}: {result.get('error')}")
                         
         except discord.Forbidden:
-            self.logger.error(f"No permission to create SB channel")
+            self.logger.error(f"No permission to create SB channels")
         except Exception as e:
-            self.logger.error(f"Failed to create SB channel: {e}")
+            self.logger.error(f"Failed to create SB channels: {e}")
     
     async def on_member_update(self, before: discord.Member, after: discord.Member):
         """Handle member role changes and mute detection"""

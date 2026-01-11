@@ -151,6 +151,14 @@ class AboutView(discord.ui.View):
     
     def get_officer_embed(self) -> discord.Embed:
         """Officer system embed"""
+        config = load_config()
+        officer_config = config.get("officer_system", {})
+        salaries = config.get("salaries", {})
+        
+        accept_reward = officer_config.get("accept_reward", 50)
+        pb_bonus = officer_config.get("pb_10h_bonus", 50)
+        master_bonus = salaries.get("sergeant_master_bonus", 50)
+        
         embed = discord.Embed(
             title="👮 Officer System",
             description=(
@@ -177,11 +185,11 @@ class AboutView(discord.ui.View):
         )
         embed.add_field(
             name="💰 Rewards",
-            value="```diff\n"
-                  "+ Per recruit accepted: $20\n"
-                  "+ 10h SB bonus: $50\n"
-                  "+ Sergeant master bonus: $50/10min\n"
-                  "```",
+            value=f"```diff\n"
+                  f"+ Per recruit accepted: ${accept_reward}\n"
+                  f"+ 10h SB bonus: ${pb_bonus}\n"
+                  f"+ Sergeant master bonus: ${master_bonus}/day\n"
+                  f"```",
             inline=False
         )
         embed.set_footer(text="👮 Officers keep the community growing!")
@@ -563,6 +571,76 @@ class SalaryModal(discord.ui.Modal, title="Set Salary Rates"):
             pass
 
 
+class OfficerRewardsModal(discord.ui.Modal, title="Set Officer Rewards"):
+    accept_reward = discord.ui.TextInput(
+        label="Accept Reward ($)",
+        placeholder="50",
+        default="50",
+        max_length=5
+    )
+    pb_10h_bonus = discord.ui.TextInput(
+        label="10h SB Bonus ($)",
+        placeholder="50",
+        default="50",
+        max_length=5
+    )
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            new_accept_reward = float(self.accept_reward.value)
+            new_pb_bonus = float(self.pb_10h_bonus.value)
+            
+            if new_accept_reward < 0 or new_pb_bonus < 0:
+                await interaction.response.send_message(
+                    "❌ Rewards must be non-negative!",
+                    ephemeral=True
+                )
+                return
+            
+            config = load_config()
+            old_accept = config.get("officer_system", {}).get("accept_reward", 20)
+            old_pb = config.get("officer_system", {}).get("pb_10h_bonus", 50)
+            
+            # Update config
+            if "officer_system" not in config:
+                config["officer_system"] = {}
+            config["officer_system"]["accept_reward"] = new_accept_reward
+            config["officer_system"]["pb_10h_bonus"] = new_pb_bonus
+            save_config(config)
+            
+            await interaction.response.send_message(
+                f"✅ Officer rewards updated:\n"
+                f"• Accept Reward: ${old_accept} → **${new_accept_reward}**\n"
+                f"• 10h SB Bonus: ${old_pb} → **${new_pb_bonus}**",
+                ephemeral=True
+            )
+        except ValueError:
+            await interaction.response.send_message(
+                "❌ Invalid numbers!",
+                ephemeral=True
+            )
+        except Exception as e:
+            import logging
+            logging.error(f"OfficerRewardsModal error: {e}", exc_info=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"❌ Error: {str(e)}",
+                    ephemeral=True
+                )
+    
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        import logging
+        logging.error(f"OfficerRewardsModal on_error: {error}", exc_info=True)
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"❌ An error occurred: {str(error)}",
+                    ephemeral=True
+                )
+        except Exception:
+            pass
+
+
 class BudgetModal(discord.ui.Modal, title="Set Server Budget"):
     amount = discord.ui.TextInput(
         label="New Budget Amount ($)",
@@ -754,6 +832,13 @@ class EconomyPanelView(discord.ui.View):
             return
         await interaction.response.send_modal(SalaryModal())
     
+    @discord.ui.button(label="Rewards", style=discord.ButtonStyle.success, row=1, custom_id="economy_panel:rewards")
+    async def officer_rewards(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ Admin only!", ephemeral=True)
+            return
+        await interaction.response.send_modal(OfficerRewardsModal())
+    
     @discord.ui.button(label="Set Budget", style=discord.ButtonStyle.danger, row=1, custom_id="economy_panel:set_budget")
     async def set_budget(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator:
@@ -761,14 +846,14 @@ class EconomyPanelView(discord.ui.View):
             return
         await interaction.response.send_modal(BudgetModal())
     
-    @discord.ui.button(label="Add Budget", style=discord.ButtonStyle.success, row=1, custom_id="economy_panel:add_budget")
+    @discord.ui.button(label="Add Budget", style=discord.ButtonStyle.success, row=2, custom_id="economy_panel:add_budget")
     async def add_budget(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ Admin only!", ephemeral=True)
             return
         await interaction.response.send_modal(AddBudgetModal())
     
-    @discord.ui.button(label="📜 History", style=discord.ButtonStyle.secondary, row=1, custom_id="economy_panel:history")
+    @discord.ui.button(label="📜 History", style=discord.ButtonStyle.secondary, row=2, custom_id="economy_panel:history")
     async def history(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ Admin only!", ephemeral=True)
@@ -776,12 +861,12 @@ class EconomyPanelView(discord.ui.View):
         embed = await self.get_history_embed()
         await interaction.response.send_message(embed=embed, ephemeral=True)
     
-    @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.secondary, row=2, custom_id="economy_panel:refresh")
+    @discord.ui.button(label="🔄 Refresh", style=discord.ButtonStyle.secondary, row=3, custom_id="economy_panel:refresh")
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = await self.get_stats_embed()
         await interaction.response.edit_message(embed=embed, view=self)
     
-    @discord.ui.button(label="🎮 Games", style=discord.ButtonStyle.secondary, row=2, custom_id="economy_panel:games")
+    @discord.ui.button(label="🎮 Games", style=discord.ButtonStyle.secondary, row=3, custom_id="economy_panel:games")
     async def games_stats(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ Admin only!", ephemeral=True)
@@ -868,6 +953,10 @@ class EconomyPanelView(discord.ui.View):
         stats = await db.get_economy_stats()
         total_balance = await db.get_total_balance()
         
+        # Get 24h changes
+        budget_24h_change = await db.get_24h_budget_change()
+        balance_24h_change = await db.get_24h_balance_change()
+        
         # Prime time calculation
         prime = config.get("prime_time", {})
         start_hour = prime.get("start_hour", 14)
@@ -927,10 +1016,16 @@ class EconomyPanelView(discord.ui.View):
         # Header with prime time
         embed.description = f"```\nPrime Time: {prime_indicator}  ({start_hour}:00-{end_hour}:00 UTC) • {prime_time_info}\n```"
         
+        # Format 24h budget change indicator
+        if budget_24h_change >= 0:
+            budget_24h_str = f"+{format_balance(budget_24h_change)}"
+        else:
+            budget_24h_str = f"-{format_balance(abs(budget_24h_change))}"
+        
         # Row 1: Core settings
         embed.add_field(
             name="BUDGET",
-            value=f"```diff\n+{format_balance(economy.total_budget)}\n```",
+            value=f"```yml\n{format_balance(economy.total_budget)}\n24h: {budget_24h_str}\n```",
             inline=True
         )
         embed.add_field(
@@ -993,11 +1088,17 @@ class EconomyPanelView(discord.ui.View):
         )
         embed.add_field(name="ALL-TIME", value=stats_text, inline=True)
         
+        # Format 24h balance change indicator
+        if balance_24h_change >= 0:
+            balance_24h_str = f"+{format_balance(balance_24h_change)}"
+        else:
+            balance_24h_str = f"-{format_balance(abs(balance_24h_change))}"
+        
         balances_text = (
             f"```yml\n"
             f"Users:  {format_balance(total_balance)}\n"
             f"Budget: {format_balance(economy.total_budget)}\n"
-            f" \n"
+            f"24h:    {balance_24h_str}\n"
             f"```"
         )
         embed.add_field(name="BALANCES", value=balances_text, inline=True)

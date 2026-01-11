@@ -101,7 +101,7 @@
         "percentage": 50
     },
     "officer_system": {
-        "accept_reward": 20,
+        "accept_reward": 50,
         "pb_10h_bonus": 50,
         "tracking_hours": 10
     },
