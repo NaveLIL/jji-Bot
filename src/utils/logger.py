@@ -15,6 +15,8 @@ import discord
 from discord import Webhook
 import aiohttp
 
+from src.utils.helpers import get_standard_footer
+
 
 class DiscordWebhookHandler(logging.Handler):
     """Send critical logs to Discord webhook"""
@@ -223,7 +225,7 @@ class DiscordLogger:
         )
         embed.add_field(name="Officer", value=f"{officer.mention}", inline=True)
         embed.add_field(name="Recruit", value=f"{recruit.mention}", inline=True)
-        embed.set_footer(text="Developed by NaveL for JJI in 2025")
+        embed.set_footer(text=get_standard_footer())
         
         try:
             await channel.send(embed=embed)
@@ -270,7 +272,7 @@ class DiscordLogger:
         if description:
             embed.add_field(name="Description", value=description, inline=False)
         
-        embed.set_footer(text="Developed by NaveL for JJI in 2025")
+        embed.set_footer(text=get_standard_footer())
         
         try:
             await channel.send(embed=embed)
@@ -314,7 +316,7 @@ class DiscordLogger:
         if tax > 0:
             embed.add_field(name="Tax", value=f"${tax:,.2f}", inline=True)
         
-        embed.set_footer(text="Developed by NaveL for JJI in 2025")
+        embed.set_footer(text=get_standard_footer())
         
         try:
             await channel.send(embed=embed)
@@ -354,7 +356,7 @@ class DiscordLogger:
         if action_taken:
             embed.add_field(name="Action Taken", value=action_taken, inline=True)
         
-        embed.set_footer(text="Developed by NaveL for JJI in 2025")
+        embed.set_footer(text=get_standard_footer())
         
         try:
             await channel.send(embed=embed)
@@ -383,7 +385,7 @@ class DiscordLogger:
         if user:
             embed.add_field(name="User", value=f"{user.mention}", inline=True)
         
-        embed.set_footer(text="Developed by NaveL for JJI in 2025")
+        embed.set_footer(text=get_standard_footer())
         
         try:
             await channel.send(embed=embed)

@@ -4,8 +4,96 @@ Utility Functions and Helpers
 
 import json
 from datetime import datetime, timezone
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 from pathlib import Path
+
+import discord
+
+
+# Standard footer for all embeds
+def get_standard_footer() -> str:
+    """Get standardized footer text with dynamic year"""
+    current_year = datetime.now().year
+    year_display = "2025" if current_year == 2025 else f"2025-{current_year}"
+    return f"💎 NaveL for jji • {year_display}"
+
+
+def create_embed(
+    title: str = None,
+    description: str = None,
+    color: Union[int, discord.Color] = None,
+    timestamp: datetime = None,
+    footer_text: str = None,
+    footer_icon: str = None,
+    author_name: str = None,
+    author_icon: str = None,
+    author_url: str = None,
+    thumbnail: str = None,
+    image: str = None,
+    fields: list = None,
+    add_standard_footer: bool = True
+) -> discord.Embed:
+    """
+    Create a standardized embed with automatic footer.
+    
+    Args:
+        title: Embed title
+        description: Embed description
+        color: Embed color (int or discord.Color)
+        timestamp: Timestamp for the embed
+        footer_text: Custom footer text (appended to standard footer if add_standard_footer=True)
+        footer_icon: Footer icon URL
+        author_name: Author name
+        author_icon: Author icon URL
+        author_url: Author URL
+        thumbnail: Thumbnail URL
+        image: Image URL
+        fields: List of dicts with 'name', 'value', and optional 'inline' keys
+        add_standard_footer: Whether to add standard footer (default True)
+    
+    Returns:
+        discord.Embed with standardized formatting
+    """
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=color,
+        timestamp=timestamp
+    )
+    
+    # Set footer
+    if add_standard_footer:
+        standard = get_standard_footer()
+        if footer_text:
+            final_footer = f"{footer_text} • {standard}"
+        else:
+            final_footer = standard
+        embed.set_footer(text=final_footer, icon_url=footer_icon)
+    elif footer_text:
+        embed.set_footer(text=footer_text, icon_url=footer_icon)
+    
+    # Set author if provided
+    if author_name:
+        embed.set_author(name=author_name, icon_url=author_icon, url=author_url)
+    
+    # Set thumbnail if provided
+    if thumbnail:
+        embed.set_thumbnail(url=thumbnail)
+    
+    # Set image if provided
+    if image:
+        embed.set_image(url=image)
+    
+    # Add fields if provided
+    if fields:
+        for field in fields:
+            embed.add_field(
+                name=field.get('name', '\u200b'),
+                value=field.get('value', '\u200b'),
+                inline=field.get('inline', False)
+            )
+    
+    return embed
 
 
 def load_config(path: str = "config.json") -> dict:

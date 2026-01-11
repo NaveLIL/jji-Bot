@@ -11,7 +11,7 @@ from datetime import datetime, timezone, timedelta
 from src.services.database import db
 from src.services.economy_logger import economy_logger, EconomyAction
 from src.models.database import TransactionType, LogType
-from src.utils.helpers import format_balance, load_config, save_config, is_prime_time
+from src.utils.helpers import format_balance, load_config, save_config, is_prime_time, get_standard_footer
 from src.utils.security import admin_only
 from src.utils.metrics import metrics
 
@@ -68,7 +68,7 @@ class AboutView(discord.ui.View):
         )
         
         embed.set_footer(
-            text="💎 Developed by NaveL for JJI • v1.0 • Use buttons to explore"
+            text=f"v1.0 • Use buttons to explore • {get_standard_footer()}"
         )
         embed.set_thumbnail(url=self.bot.user.display_avatar.url if self.bot.user else None)
         
@@ -1529,7 +1529,7 @@ class AdminCog(commands.Cog):
             inline=False
         )
         
-        embed.set_footer(text="💎 Developed by NaveL for JJI in 2025")
+        embed.set_footer(text=get_standard_footer())
         
         await interaction.response.send_message(embed=embed)
     

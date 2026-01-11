@@ -26,6 +26,8 @@ from src.utils.helpers import (
     is_blackjack,
     can_split,
     can_double,
+    get_standard_footer,
+    create_embed,
 )
 
 from src.utils.logger import (

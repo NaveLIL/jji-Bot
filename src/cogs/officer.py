@@ -9,7 +9,7 @@ from discord.ext import commands
 from src.services.database import db
 from src.services.economy_logger import economy_logger, EconomyAction
 from src.models.database import TransactionType
-from src.utils.helpers import format_balance, format_pb_time, load_config, calculate_tax
+from src.utils.helpers import format_balance, format_pb_time, load_config, calculate_tax, get_standard_footer
 from src.utils.security import rate_limited, officer_only
 from src.utils.metrics import metrics
 from src.utils.logger import DiscordLogger
@@ -180,7 +180,7 @@ class OfficerCog(commands.Cog):
         else:
             embed.add_field(name="💰 Reward", value=f"```diff\n+ {format_balance(net_reward)}\n```", inline=False)
         
-        embed.set_footer(text="💎 Track their 10h SB for bonus • Developed by NaveL for JJI in 2025")
+        embed.set_footer(text=f"💎 Track their 10h SB for bonus • {get_standard_footer()}")
         
         await interaction.response.send_message(embed=embed)
     
@@ -273,7 +273,7 @@ class OfficerCog(commands.Cog):
         )
         
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
-        embed.set_footer(text="💎 Developed by NaveL for JJI in 2025")
+        embed.set_footer(text=get_standard_footer())
         
         await interaction.response.send_message(embed=embed)
     
@@ -344,7 +344,7 @@ class OfficerCog(commands.Cog):
                     inline=True
                 )
         
-        embed.set_footer(text="💎 Developed by NaveL for JJI in 2025")
+        embed.set_footer(text=get_standard_footer())
         
         await interaction.response.send_message(embed=embed)
 

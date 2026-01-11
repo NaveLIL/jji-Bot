@@ -1,5 +1,5 @@
 """
-Cogs Package for JJI Bot
+Cogs Package for jji Bot
 """
 
 COGS = [

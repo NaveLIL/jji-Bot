@@ -12,7 +12,7 @@ from discord.ext import commands
 from src.services.database import db
 from src.services.economy_logger import economy_logger, EconomyAction
 from src.models.database import TransactionType
-from src.utils.helpers import format_balance, calculate_tax, load_config
+from src.utils.helpers import format_balance, calculate_tax, load_config, get_standard_footer
 from src.utils.security import rate_limited
 from src.utils.metrics import metrics
 
@@ -63,7 +63,7 @@ class EconomyCog(commands.Cog):
         embed.add_field(name="⏱️ SB Time", value=f"`{sb_hours}h {sb_mins}m`", inline=True)
         embed.add_field(name="🎒 Roles", value=f"`{role_count}`", inline=True)
         
-        embed.set_footer(text="💎 Developed by NaveL for JJI in 2025")
+        embed.set_footer(text=get_standard_footer())
         
         await interaction.response.send_message(embed=embed)
     
@@ -199,7 +199,7 @@ class EconomyCog(commands.Cog):
             inline=True
         )
         
-        embed.set_footer(text="💎 Developed by NaveL for JJI in 2025")
+        embed.set_footer(text=get_standard_footer())
         
         await interaction.response.send_message(embed=embed)
     

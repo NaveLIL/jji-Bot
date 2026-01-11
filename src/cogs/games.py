@@ -19,7 +19,7 @@ from src.services.economy_logger import economy_logger, EconomyAction
 from src.models.database import TransactionType, GameType
 from src.games.blackjack import create_blackjack_game, BlackjackGame, GameState, PvPBlackjackGame, Shoe, Hand
 from src.games.coinflip import create_coinflip_game, CoinflipResult, CoinSide
-from src.utils.helpers import format_balance, validate_bet, calculate_tax, load_config
+from src.utils.helpers import format_balance, validate_bet, calculate_tax, load_config, get_standard_footer
 from src.utils.security import rate_limited, game_rate_limited
 from src.utils.metrics import metrics
 
@@ -267,9 +267,9 @@ class EnhancedBlackjackView(discord.ui.View):
                 "💡 Never split 10s or 5s",
                 "💡 Double on 11 against dealer 2-10"
             ]
-            embed.set_footer(text=random.choice(tips) + " • Developed by NaveL for JJI in 2025")
+            embed.set_footer(text=f"{random.choice(tips)} • {get_standard_footer()}")
         else:
-            embed.set_footer(text="🎰 Press 'Play Again' for another round! • Developed by NaveL for JJI in 2025")
+            embed.set_footer(text=f"🎰 Press 'Play Again' for another round! • {get_standard_footer()}")
         
         return embed
     
@@ -648,7 +648,7 @@ class QuitButton(discord.ui.Button):
             return
         
         embed = view.get_embed()
-        embed.set_footer(text="Thanks for playing! • Developed by NaveL for JJI in 2025")
+        embed.set_footer(text=f"Thanks for playing! • {get_standard_footer()}")
         await interaction.response.edit_message(embed=embed, view=None)
 
 
@@ -1388,7 +1388,7 @@ class GamesCog(commands.Cog):
         embed.add_field(name="Result", value=f"`{game.result_side.upper() if game.result_side else 'EDGE'}`", inline=True)
         embed.add_field(name="Bet", value=f"`{format_balance(bet)}`", inline=True)
         embed.add_field(name="Profit/Loss", value=f"`{profit}`", inline=True)
-        embed.set_footer(text="Developed by NaveL for JJI in 2025")
+        embed.set_footer(text=get_standard_footer())
         
         await message.edit(embed=embed)
 

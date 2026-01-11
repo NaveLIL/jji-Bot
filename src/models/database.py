@@ -1,6 +1,6 @@
 """
 SQLAlchemy 2.0 Database Models
-Discord Bot for JJI Squad
+Discord Bot for jji Squad
 """
 
 from datetime import datetime

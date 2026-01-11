@@ -1,7 +1,7 @@
 """
-JJI Squad Discord Bot
+jji Squad Discord Bot
 Discord bot for gaming community
-Developed by NaveL for JJI in 2025
+Developed by NaveL for jji
 """
 
 import os
@@ -24,7 +24,7 @@ from src.services.database import db
 from src.services.cache import cache
 from src.services.economy_logger import EconomyLogger, EconomyAction, economy_logger
 from src.models.database import TransactionType, ServerEconomy, User, Transaction, VoiceSession
-from src.utils.helpers import load_config, save_config, is_prime_time, format_balance
+from src.utils.helpers import load_config, save_config, is_prime_time, format_balance, get_standard_footer
 from src.utils.logger import setup_logging, DiscordLogger
 from src.utils.metrics import metrics
 
@@ -270,6 +270,38 @@ class JJIBot(commands.Bot):
         """Handle when someone joins master channel - create paired SB channels (Ground + Air) for sergeants"""
         config = self.config
         
+        # Check prime time
+        prime_time = config.get("prime_time", {})
+        is_prime = is_prime_time(
+            prime_time.get("start_hour", 14),
+            prime_time.get("end_hour", 22)
+        )
+        
+        if not is_prime:
+            # Not prime time - deny channel creation
+            try:
+                embed = discord.Embed(
+                    title="Squadron Battles Unavailable",
+                    description="Squadron Battles can only be created during **Prime Time**.",
+                    color=0xFF3333
+                )
+                embed.add_field(
+                    name="Prime Time Hours",
+                    value=f"`{prime_time.get('start_hour', 14):02d}:00 - {prime_time.get('end_hour', 22):02d}:00 UTC`",
+                    inline=False
+                )
+                embed.add_field(
+                    name="Why Prime Time?",
+                    value="We concentrate battles during peak hours to ensure full squads and better gameplay experience.",
+                    inline=False
+                )
+                embed.set_footer(text=get_standard_footer())
+                
+                await member.send(embed=embed)
+            except Exception as e:
+                self.logger.error(f"Failed to send prime time notification to {member}: {e}")
+            return
+        
         # Check if user has sergeant role (from Discord, not just DB flag)
         sergeant_role_id = config.get("roles", {}).get("sergeant")
         officer_role_id = config.get("roles", {}).get("officer")
@@ -336,7 +368,39 @@ class JJIBot(commands.Bot):
                 await ground_channel.edit(category=master_channel.category, position=base_position)
                 await air_channel.edit(category=master_channel.category, position=base_position + 1)
             
-            # Move the sergeant to the ground channel by default
+            # Sergeant daily bonus - CLAIM BEFORE moving user
+            claimed = await db.claim_master_bonus(member.id)
+            if claimed:
+                bonus = config.get("salaries", {}).get("sergeant_master_bonus", 50)
+                
+                # Pay bonus atomically from budget (no tax on bonuses)
+                result = await db.pay_from_budget_atomic(
+                    discord_id=member.id,
+                    gross_amount=bonus,
+                    net_amount=bonus,  # No tax on bonus
+                    tax_amount=0,
+                    transaction_type=TransactionType.MASTER_BONUS,
+                    description="Daily Squadron Battle host bonus"
+                )
+                
+                if result["success"]:
+                    self.logger.info(f"Sergeant {member} claimed SB host bonus: ${bonus}")
+                    metrics.track_transaction("master_bonus")
+                    
+                    # DM the sergeant about their bonus
+                    try:
+                        dm_embed = discord.Embed(
+                            title="🎖️ Squadron Battle Host Bonus!",
+                            description=f"You received **{format_balance(bonus)}** for hosting Squadron Battles today!",
+                            color=0x00FF00
+                        )
+                        await member.send(embed=dm_embed)
+                    except Exception:
+                        pass
+                else:
+                    self.logger.warning(f"Failed to pay SB bonus to {member}: {result.get('error')}")
+            
+            # Move the sergeant to the ground channel by default (AFTER claiming bonus)
             await member.move_to(ground_channel, reason="Moved to new Squadron Battle Ground channel")
             
             self.logger.info(f"Created SB #{next_num} channels (Ground + Air) by {member}")
@@ -406,38 +470,6 @@ class JJIBot(commands.Bot):
                         }
                 except Exception as e:
                     self.logger.error(f"Failed to send SB ping: {e}")
-            
-            # Sergeant daily bonus
-            claimed = await db.claim_master_bonus(member.id)
-            if claimed:
-                bonus = config.get("salaries", {}).get("sergeant_master_bonus", 50)
-                
-                # Pay bonus atomically from budget (no tax on bonuses)
-                result = await db.pay_from_budget_atomic(
-                    discord_id=member.id,
-                    gross_amount=bonus,
-                    net_amount=bonus,  # No tax on bonus
-                    tax_amount=0,
-                    transaction_type=TransactionType.MASTER_BONUS,
-                    description="Daily Squadron Battle host bonus"
-                )
-                
-                if result["success"]:
-                    self.logger.info(f"Sergeant {member} claimed SB host bonus: ${bonus}")
-                    metrics.track_transaction("master_bonus")
-                    
-                    # DM the sergeant about their bonus
-                    try:
-                        dm_embed = discord.Embed(
-                            title="🎖️ Squadron Battle Host Bonus!",
-                            description=f"You received **{format_balance(bonus)}** for hosting Squadron Battles today!",
-                            color=0x00FF00
-                        )
-                        await member.send(embed=dm_embed)
-                    except Exception:
-                        pass
-                else:
-                    self.logger.warning(f"Failed to pay SB bonus to {member}: {result.get('error')}")
                         
         except discord.Forbidden:
             self.logger.error(f"No permission to create SB channels")
@@ -683,9 +715,13 @@ class JJIBot(commands.Bot):
             skipped_muted = 0
             
             # Get active voice sessions with users (with FOR UPDATE to prevent race conditions)
+            # Only pay users NOT in master channel (is_in_master=False means they're in actual SB channels)
             sessions_result = await session.execute(
                 select(VoiceSession)
-                .where(VoiceSession.is_active == True)
+                .where(
+                    VoiceSession.is_active == True,
+                    VoiceSession.is_in_master == False  # Only SB channels, not master channel
+                )
                 .options(selectinload(VoiceSession.user))
             )
             sessions = sessions_result.scalars().all()

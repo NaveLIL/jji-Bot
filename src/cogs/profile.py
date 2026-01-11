@@ -8,7 +8,7 @@ from discord.ext import commands
 from typing import Literal
 
 from src.services.database import db
-from src.utils.helpers import format_balance, format_pb_time, get_rank_emoji
+from src.utils.helpers import format_balance, format_pb_time, get_rank_emoji, get_standard_footer
 from src.utils.security import rate_limited
 
 
@@ -83,7 +83,7 @@ class LeaderboardView(discord.ui.View):
             
             embed.description += "\n".join(lines)
         
-        embed.set_footer(text=f"📄 Page {self.page + 1}/{self.total_pages} • 💎 Developed by NaveL for JJI in 2025")
+        embed.set_footer(text=f"📄 Page {self.page + 1}/{self.total_pages} • {get_standard_footer()}")
         
         await self.update_buttons()
         return embed
@@ -191,7 +191,7 @@ class ProfileCog(commands.Cog):
             inline=True
         )
         
-        embed.set_footer(text="💎 Developed by NaveL for JJI in 2025")
+        embed.set_footer(text=get_standard_footer())
         
         await interaction.response.send_message(embed=embed)
     
@@ -274,7 +274,7 @@ class ProfileCog(commands.Cog):
             inline=False
         )
         
-        embed.set_footer(text="💎 Developed by NaveL for JJI in 2025")
+        embed.set_footer(text=get_standard_footer())
         
         await interaction.response.send_message(embed=embed)
 
