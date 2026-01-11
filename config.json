@@ -34,8 +34,8 @@
         "sergeant_master_bonus": 50
     },
     "prime_time": {
-        "start_hour": 0,
-        "end_hour": 23,
+        "start_hour": 14,
+        "end_hour": 22,
         "timezone": "UTC"
     },
     "case": {
