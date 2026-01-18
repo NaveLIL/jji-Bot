@@ -109,5 +109,9 @@
         "color_role_price": 100,
         "max_active_roles": 5,
         "sell_refund_percentage": 10
+    },
+    "member_leave": {
+        "confiscate_balance": true,
+        "return_to_budget": true
     }
 }

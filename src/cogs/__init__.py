@@ -9,4 +9,5 @@ COGS = [
     "src.cogs.marketplace",
     "src.cogs.officer",
     "src.cogs.admin",
+    "src.cogs.faq",
 ]

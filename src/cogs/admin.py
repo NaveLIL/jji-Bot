@@ -19,7 +19,7 @@ from src.utils.metrics import metrics
 # ==================== ABOUT VIEW ====================
 
 class AboutView(discord.ui.View):
-    """Interactive About panel with category buttons"""
+    """Interactive About panel with category buttons - comprehensive user guide"""
     
     def __init__(self, bot: commands.Bot):
         super().__init__(timeout=300)
@@ -41,7 +41,7 @@ class AboutView(discord.ui.View):
         
         embed.description = (
             "## ⚡ Discord Economy System\n"
-            "*Bot for jji gaming community*\n\n"
+            "*Complete guide for jji gaming community*\n\n"
             "───────────────────────────\n"
             "💎 **Closed-loop economy** — all money stays in the system\n"
             "📊 **Real-time tracking** — every transaction logged\n"
@@ -58,7 +58,7 @@ class AboutView(discord.ui.View):
         )
         
         embed.add_field(
-            name="🎯 Features",
+            name="🎯 Main Features",
             value="💰 Economy & Salaries\n"
                   "🎮 Casino Games\n"
                   "🛒 Role Marketplace\n"
@@ -67,20 +67,32 @@ class AboutView(discord.ui.View):
             inline=True
         )
         
+        embed.add_field(
+            name="📚 Key Terms",
+            value="**Balance** — Your money\n"
+                  "**Budget** — Server money pool\n"
+                  "**Tax** — % returned to budget\n"
+                  "**Prime Time** — 2x salary hours",
+            inline=False
+        )
+        
         embed.set_footer(
-            text=f"v1.0 • Use buttons to explore • {get_standard_footer()}"
+            text=f"v1.0 • Use buttons below to explore • {get_standard_footer()}"
         )
         embed.set_thumbnail(url=self.bot.user.display_avatar.url if self.bot.user else None)
         
         return embed
     
     def get_economy_embed(self) -> discord.Embed:
-        """Economy commands embed"""
+        """Economy commands embed with detailed info"""
+        config = load_config()
+        tax_rate = config.get("economy", {}).get("tax_rate", 10)
+        case_config = config.get("case", {})
+        
         embed = discord.Embed(
             title="💰 Economy System",
             description=(
-                "*All money circulates within the server budget*\n"
-                "*Taxes return to budget • No inflation • Balanced system*\n"
+                "*Closed-loop system — money circulates, never created or destroyed*\n"
                 "─────────────────────────────────"
             ),
             color=0x57F287
@@ -88,111 +100,388 @@ class AboutView(discord.ui.View):
         
         embed.add_field(
             name="📋 Basic Commands",
-            value=">>> `/balance` — Check your wallet\n"
-                  "`/pay` — Transfer money to user\n"
-                  "`/case` — Daily case (24h cooldown)\n"
-                  "`/daily` — Alias for case",
-            inline=True
-        )
-        embed.add_field(
-            name="🛒 Shop Commands",
-            value=">>> `/shop` — Browse role marketplace\n"
-                  "`/buy_role` — Purchase a role\n"
-                  "`/sell_role` — Sell owned role\n"
-                  "`/myroles` — View your roles",
-            inline=True
-        )
-        embed.add_field(
-            name="📊 Statistics",
-            value=">>> `/stats` — Server economy overview\n"
-                  "`/leaderboard` — Top players ranking\n"
-                  "`/profile` — View any user's profile",
+            value=">>> `/balance` — Check your wallet, rank, SB time\n"
+                  "`/pay @user [amount]` — Transfer money (taxed)\n"
+                  "`/case` or `/daily` — Free daily case\n"
+                  "`/stats` — Server economy overview",
             inline=False
         )
-        embed.set_footer(text="💡 All rewards are taxed • Tax returns to server budget")
+        
+        embed.add_field(
+            name="💳 How /pay Works",
+            value=f"Tax rate: **{tax_rate}%**\n"
+                  f"Example: Send $100 → $10 tax → They get $90\n"
+                  f"*Tax returns to server budget*",
+            inline=True
+        )
+        
+        empty_chance = case_config.get("empty_chance", 30)
+        embed.add_field(
+            name="📦 Daily Case Rewards",
+            value=f"• {empty_chance}% empty case\n"
+                  f"• 60% low: $1-5\n"
+                  f"• 30% medium: $6-15\n"
+                  f"• 10% high: $16-50",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="📊 Other Commands",
+            value=">>> `/profile [@user]` — View detailed profile\n"
+                  "`/leaderboard [balance/pb_time]` — Rankings",
+            inline=False
+        )
+        
+        embed.set_footer(text="💡 All income is taxed • Tax keeps economy balanced")
         return embed
     
     def get_games_embed(self) -> discord.Embed:
-        """Games commands embed"""
+        """Games overview embed"""
+        config = load_config()
+        games_config = config.get("games", {})
+        bj_payout = games_config.get("blackjack", {}).get("blackjack_payout", 1.5)
+        min_bet = config.get("economy", {}).get("min_bet", 1)
+        max_bet = config.get("economy", {}).get("max_bet", 10000)
+        
         embed = discord.Embed(
             title="🎮 Casino Games",
             description=(
                 "*Fair games • House edge goes to server budget*\n"
-                "*All winnings taxed • 100% closed-loop*\n"
+                f"*Bet limits: ${min_bet} - ${max_bet}*\n"
                 "─────────────────────────────────"
             ),
             color=0xFEE75C
         )
         
         embed.add_field(
-            name="🃏 Blackjack",
-            value=">>> **Command:** `/blackjack [bet]`\n"
-                  "Classic 21 card game\n"
-                  "Hit, Stand, Double, Split\n"
-                  "Blackjack pays 1.5x",
+            name="🃏 Blackjack vs Dealer",
+            value=f">>> `/blackjack [bet]`\n"
+                  f"Goal: Get closest to 21\n"
+                  f"Blackjack pays **{bj_payout}x**\n"
+                  f"Dealer stands on soft 17",
             inline=True
         )
-        embed.add_field(
-            name="🪙 Coinflip",
-            value=">>> **Command:** `/coinflip [bet] [side]`\n"
-                  "Pick heads or tails\n"
-                  "50/50 chance\n"
-                  "Instant results",
-            inline=True
-        )
+        
         embed.add_field(
             name="⚔️ PvP Blackjack",
-            value=">>> **Command:** `/blackjack_pvp [@user] [bet]`\n"
-                  "Challenge other players • Winner takes all (minus tax)",
+            value=">>> `/blackjack_pvp @user [bet]`\n"
+                  "Challenge another player\n"
+                  "Best hand wins opponent's bet\n"
+                  "Ties = money back",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🪙 Coinflip",
+            value=">>> `/coinflip [bet] [heads/tails]`\n"
+                  "50/50 chance\n"
+                  "Win = **2x bet** (minus tax)\n"
+                  "Simple and fast!",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🎴 Blackjack Actions",
+            value="🎴 **HIT** — Get another card\n"
+                  "🛑 **STAND** — Keep current hand\n"
+                  "💰 **DOUBLE** — Double bet, get one card\n"
+                  "✂️ **SPLIT** — Split matching cards\n"
+                  "🏳️ **SURRENDER** — Give up for half bet",
             inline=False
         )
-        embed.set_footer(text="⚠️ Gamble responsibly • Bets limited by balance & config")
+        
+        embed.set_footer(text="⚠️ Gamble responsibly • All winnings taxed • Press 'Strategy' for tips")
+        return embed
+    
+    def get_strategy_embed(self) -> discord.Embed:
+        """Blackjack strategy tips embed"""
+        embed = discord.Embed(
+            title="🧠 Blackjack Strategy Guide",
+            description=(
+                "*Basic strategy to improve your odds*\n"
+                "─────────────────────────────────"
+            ),
+            color=0x9B59B6
+        )
+        
+        embed.add_field(
+            name="📊 Card Values",
+            value="**2-10** = Face value\n"
+                  "**J, Q, K** = 10\n"
+                  "**Ace** = 1 or 11",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🎯 When to STAND",
+            value="• 17+ (always)\n"
+                  "• 12-16 if dealer shows 2-6\n"
+                  "• Soft 18+ (A+7 or better)",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🎴 When to HIT",
+            value="• 11 or less (always safe)\n"
+                  "• 12-16 if dealer shows 7+\n"
+                  "• Soft 17 or less",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="💰 When to DOUBLE",
+            value="• **11** vs dealer 2-10\n"
+                  "• **10** vs dealer 2-9\n"
+                  "• **9** vs dealer 3-6\n"
+                  "• **Soft 16-18** vs dealer 4-6",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="✂️ When to SPLIT",
+            value="**Always split:** Aces, 8s\n"
+                  "**Never split:** 10s, 5s, 4s\n"
+                  "**Situational:** 2s, 3s, 6s, 7s, 9s",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🏳️ When to SURRENDER",
+            value="• **16** vs dealer 9, 10, A\n"
+                  "• **15** vs dealer 10\n"
+                  "*Saves half your bet!*",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="⚠️ Remember",
+            value="• House always has slight edge\n"
+                  "• Winnings are taxed\n"
+                  "• Set a budget and stick to it\n"
+                  "• Don't chase losses!",
+            inline=False
+        )
+        
+        embed.set_footer(text="📈 Following basic strategy reduces house edge significantly")
+        return embed
+    
+    def get_shop_embed(self) -> discord.Embed:
+        """Role shop detailed embed"""
+        config = load_config()
+        tax_rate = config.get("economy", {}).get("tax_rate", 10)
+        refund = config.get("role_shop", {}).get("sell_refund_percentage", 10)
+        
+        embed = discord.Embed(
+            title="🛒 Role Marketplace",
+            description=(
+                "*Buy and sell cosmetic roles*\n"
+                "─────────────────────────────────"
+            ),
+            color=0xE91E63
+        )
+        
+        embed.add_field(
+            name="🎨 Color Roles",
+            value="Change your name color!\n"
+                  "• **Limit:** 1 at a time\n"
+                  "• New color replaces old\n"
+                  "• Old role auto-removed",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="📛 Name Roles",
+            value="Special badges for your name!\n"
+                  "• **Limit:** Up to 5 roles\n"
+                  "• Stack multiple badges\n"
+                  "• Show off your style",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="📋 Commands",
+            value=">>> `/shop` — Browse all roles\n"
+                  "`/myroles` or `/inventory` — Your roles\n"
+                  "`/sellrole @role` — Sell owned role",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="💰 Pricing",
+            value=f"**Tax on purchase:** {tax_rate}%\n"
+                  f"**Sell refund:** {refund}% of original\n"
+                  f"*Example: Buy $100 role → Pay $110*\n"
+                  f"*Sell same role → Get $10 back*",
+            inline=False
+        )
+        
+        embed.set_footer(text="🛒 Use tabs in /shop to switch between Colors and Names")
         return embed
     
     def get_officer_embed(self) -> discord.Embed:
-        """Officer system embed"""
+        """Officer system detailed embed"""
         config = load_config()
         officer_config = config.get("officer_system", {})
         salaries = config.get("salaries", {})
         
         accept_reward = officer_config.get("accept_reward", 50)
         pb_bonus = officer_config.get("pb_10h_bonus", 50)
+        tracking_hours = officer_config.get("tracking_hours", 10)
         master_bonus = salaries.get("sergeant_master_bonus", 50)
         
         embed = discord.Embed(
             title="👮 Officer System",
             description=(
-                "*Officers earn rewards for recruiting new members*\n"
-                "*Track your recruits • Earn bonuses • Build your team*\n"
+                "*Officers earn rewards for recruiting & mentoring*\n"
                 "─────────────────────────────────"
             ),
             color=0x5865F2
         )
         
         embed.add_field(
-            name="📝 Recruitment",
-            value=">>> `/accept` — Accept a new recruit\n"
+            name="📝 Recruitment Commands",
+            value=">>> `/accept @recruit` — Accept new member\n"
                   "`/recruits` — View your recruit list\n"
                   "`/officer_stats` — Your statistics",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="💰 Recruitment Rewards",
+            value=f"**Per accept:** ${accept_reward}\n"
+                  f"**{tracking_hours}h bonus:** ${pb_bonus}\n"
+                  f"*Bonus when recruit reaches {tracking_hours}h*",
             inline=True
         )
+        
         embed.add_field(
-            name="📈 SB Tracking",
-            value=">>> `/sb_start` — Start SB session\n"
-                  "`/sb_stop` — End SB session\n"
-                  "`/sb_stats` — View SB statistics",
+            name="🎖️ Sergeant Bonus",
+            value=f"**Master bonus:** ${master_bonus}/day\n"
+                  f"*Sergeants managing SB channel*\n"
+                  f"*Paid during salary distribution*",
             inline=True
         )
+        
         embed.add_field(
-            name="💰 Rewards",
-            value=f"```diff\n"
-                  f"+ Per recruit accepted: ${accept_reward}\n"
-                  f"+ 10h SB bonus: ${pb_bonus}\n"
-                  f"+ Sergeant master bonus: ${master_bonus}/day\n"
+            name="📋 /recruits Status Icons",
+            value="⏳ Working towards bonus\n"
+                  "🎁 Bonus ready to claim\n"
+                  "✅ Bonus already claimed",
+            inline=False
+        )
+        
+        embed.set_footer(text="👮 Officers help the community grow! Check /officer_stats for your progress")
+        return embed
+    
+    def get_salary_embed(self) -> discord.Embed:
+        """SB Time and Salary detailed embed"""
+        config = load_config()
+        salaries = config.get("salaries", {})
+        prime_time = config.get("prime_time", {})
+        
+        soldier_rate = salaries.get("soldier_per_10min", 10)
+        sergeant_rate = salaries.get("sergeant_per_10min", 20)
+        officer_rate = salaries.get("officer_per_10min", 20)
+        
+        start_hour = prime_time.get("start_hour", 14)
+        end_hour = prime_time.get("end_hour", 22)
+        
+        embed = discord.Embed(
+            title="📈 SB Time & Salaries",
+            description=(
+                "*Get paid for being in voice channels!*\n"
+                "─────────────────────────────────"
+            ),
+            color=0x00D166
+        )
+        
+        embed.add_field(
+            name="💵 Salary Rates (per 10 min)",
+            value=f"```\n"
+                  f"Role      │ Normal │ Prime Time\n"
+                  f"──────────┼────────┼───────────\n"
+                  f"⚔️ Soldier │  ${soldier_rate:<5} │  ${soldier_rate*2}\n"
+                  f"🎖️ Sergeant│  ${sergeant_rate:<5} │  ${sergeant_rate*2}\n"
+                  f"👮 Officer │  ${officer_rate:<5} │  ${officer_rate*2}\n"
                   f"```",
             inline=False
         )
-        embed.set_footer(text="👮 Officers keep the community growing!")
+        
+        embed.add_field(
+            name="⏰ Prime Time",
+            value=f"**Hours:** {start_hour}:00 - {end_hour}:00 UTC\n"
+                  f"**Bonus:** 2x salary\n"
+                  f"*Check `/stats` for current status*",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="📋 Requirements",
+            value="• Be in voice channel\n"
+                  "• Not in AFK channel\n"
+                  "• Not muted/timed out\n"
+                  "• Have eligible role",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="📊 Track Your Time",
+            value=">>> `/profile` — See total SB time\n"
+                  "`/leaderboard pb_time` — Time rankings",
+            inline=False
+        )
+        
+        embed.set_footer(text="💡 Salaries paid automatically • Just join voice and earn!")
+        return embed
+    
+    def get_faq_embed(self) -> discord.Embed:
+        """FAQ embed"""
+        embed = discord.Embed(
+            title="❓ Frequently Asked Questions",
+            description="─────────────────────────────────",
+            color=0x3498DB
+        )
+        
+        embed.add_field(
+            name="💰 Where does money come from?",
+            value="Server has a fixed budget. Money only moves between budget and users — it's **never created** during normal operations.",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="📊 What's tax for?",
+            value="Tax returns money to server budget, preventing inflation. Without tax, money would only drain from budget.",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="🎮 Is gambling fair?",
+            value="Games have small house edge (like real casinos). Blackjack uses standard rules. Long-term, house profits slightly.",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="🛒 Can I have multiple color roles?",
+            value="No, only **1 color role** at a time. Buying new one auto-replaces the old one.",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="💸 What's the sell refund?",
+            value="You get **10%** of original price back when selling a role.",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="🔧 Commands not working?",
+            value="• Check permissions\n"
+                  "• Wait for cooldown\n"
+                  "• Try again in a few seconds\n"
+                  "• Ask an admin",
+            inline=False
+        )
+        
+        embed.set_footer(text="📚 Still confused? Ask in help channel or contact an Officer!")
         return embed
     
     def get_admin_embed(self) -> discord.Embed:
@@ -201,7 +490,7 @@ class AboutView(discord.ui.View):
             title="⚙️ Administration",
             description=(
                 "*Commands require administrator permissions*\n"
-                "*Use responsibly • All actions are logged*\n"
+                "*All actions are logged to security channel*\n"
                 "─────────────────────────────────"
             ),
             color=0xED4245
@@ -210,30 +499,47 @@ class AboutView(discord.ui.View):
         embed.add_field(
             name="💰 Economy Control",
             value=">>> `/economy_panel` — Full dashboard\n"
-                  "`/addbalance` — Add money to user\n"
-                  "`/fine` — Remove money (penalty)\n"
-                  "`/confiscate` — Take money (no budget)",
+                  "`/addbalance @user [amt]` — Give money\n"
+                  "`/fine @user [amt]` — Take money\n"
+                  "`/confiscate @user` — Take ALL money",
             inline=True
         )
+        
         embed.add_field(
             name="⚙️ Configuration",
-            value=">>> `/set_channel` — Configure channels\n"
-                  "`/sync_commands` — Resync commands\n"
-                  "`/botstats` — Bot statistics",
+            value=">>> `/set_log_channel` — Set log channels\n"
+                  "`/set_master_channel` — Voice channel\n"
+                  "`/sync_commands` — Resync\n"
+                  "`/botstats` — Statistics",
             inline=True
         )
+        
+        embed.add_field(
+            name="📊 Economy Panel Features",
+            value="• **Tax Rate** — Set transaction tax\n"
+                  "• **Soldier Value** — Value per new soldier\n"
+                  "• **Prime Time** — Set 2x salary hours\n"
+                  "• **Salaries** — Configure pay rates\n"
+                  "• **Rewards** — Officer payment settings\n"
+                  "• **Budget** — Modify server funds (⚠️)",
+            inline=False
+        )
+        
         embed.add_field(
             name="🛡️ Security Features",
             value="• All admin actions logged\n"
-                  "• Rate limiting active\n"
-                  "• Atomic transactions\n"
-                  "• Budget integrity checks",
+                  "• Rate limiting on all commands\n"
+                  "• Atomic database transactions\n"
+                  "• Budget integrity checks\n"
+                  "• Closed-loop violation warnings",
             inline=False
         )
-        embed.set_footer(text="🔒 Admin actions are logged to security channel")
+        
+        embed.set_footer(text="🔒 Budget injection requires explicit confirmation • Use responsibly")
         return embed
     
-    @discord.ui.button(label="Overview", style=discord.ButtonStyle.primary, emoji="🏠", row=0)
+    # Row 0: Main navigation
+    @discord.ui.button(label="Home", style=discord.ButtonStyle.primary, emoji="🏠", row=0)
     async def main_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.current_page = "main"
         await interaction.response.edit_message(embed=self.get_main_embed(), view=self)
@@ -248,10 +554,31 @@ class AboutView(discord.ui.View):
         self.current_page = "games"
         await interaction.response.edit_message(embed=self.get_games_embed(), view=self)
     
+    @discord.ui.button(label="Strategy", style=discord.ButtonStyle.secondary, emoji="🧠", row=0)
+    async def strategy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page = "strategy"
+        await interaction.response.edit_message(embed=self.get_strategy_embed(), view=self)
+    
+    # Row 1: More categories
+    @discord.ui.button(label="Shop", style=discord.ButtonStyle.success, emoji="🛒", row=1)
+    async def shop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page = "shop"
+        await interaction.response.edit_message(embed=self.get_shop_embed(), view=self)
+    
     @discord.ui.button(label="Officers", style=discord.ButtonStyle.primary, emoji="👮", row=1)
     async def officer_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.current_page = "officer"
         await interaction.response.edit_message(embed=self.get_officer_embed(), view=self)
+    
+    @discord.ui.button(label="Salaries", style=discord.ButtonStyle.success, emoji="📈", row=1)
+    async def salary_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page = "salary"
+        await interaction.response.edit_message(embed=self.get_salary_embed(), view=self)
+    
+    @discord.ui.button(label="FAQ", style=discord.ButtonStyle.secondary, emoji="❓", row=1)
+    async def faq_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page = "faq"
+        await interaction.response.edit_message(embed=self.get_faq_embed(), view=self)
     
     @discord.ui.button(label="Admin", style=discord.ButtonStyle.danger, emoji="⚙️", row=1)
     async def admin_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -641,6 +968,120 @@ class OfficerRewardsModal(discord.ui.Modal, title="Set Officer Rewards"):
             pass
 
 
+class SetBudgetWarningView(discord.ui.View):
+    """Warning view for setting budget higher than current - protects closed-loop economy"""
+    
+    def __init__(self, new_amount: float, old_amount: float, admin_id: int):
+        super().__init__(timeout=60)
+        self.new_amount = new_amount
+        self.old_amount = old_amount
+        self.admin_id = admin_id
+        self.injection_amount = new_amount - old_amount
+    
+    def get_warning_embed(self) -> discord.Embed:
+        """Generate the warning embed"""
+        embed = discord.Embed(
+            title="⚠️ CLOSED-LOOP ECONOMY VIOLATION WARNING",
+            color=0xFF0000
+        )
+        
+        embed.description = (
+            "**Setting budget higher than current will inject money from outside the system.**\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "🔴 **THIS ACTION VIOLATES THE FUNDAMENTAL PRINCIPLES OF THIS ECONOMIC SYSTEM**\n\n"
+            "This bot operates on a **closed-loop economy** model where:\n"
+            "• The total money supply remains **constant**\n"
+            "• Money only **circulates** between users and the server budget\n"
+            "• No currency is created or destroyed during normal operations\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "**By proceeding, you acknowledge that:**\n"
+            "```diff\n"
+            f"- You are creating {format_balance(self.injection_amount)} from nothing\n"
+            "- This will cause economic inflation\n"
+            "- This action cannot be automatically reversed\n"
+            "- All budget modifications are permanently logged\n"
+            "```\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
+        
+        embed.add_field(name="Current Budget", value=format_balance(self.old_amount), inline=True)
+        embed.add_field(name="New Budget", value=format_balance(self.new_amount), inline=True)
+        embed.add_field(name="💉 Injection Amount", value=f"+{format_balance(self.injection_amount)}", inline=True)
+        
+        embed.set_footer(text="⏱️ This confirmation expires in 60 seconds • Think carefully before proceeding")
+        return embed
+    
+    @discord.ui.button(label="I UNDERSTAND - PROCEED ANYWAY", style=discord.ButtonStyle.danger, emoji="⚠️")
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.admin_id:
+            return await interaction.response.send_message("❌ Only the original administrator can confirm this action.", ephemeral=True)
+        
+        # Actually perform the budget set
+        async with db.session() as session:
+            from sqlalchemy import select, update
+            from src.models.database import ServerEconomy
+            
+            await session.execute(
+                update(ServerEconomy).values(total_budget=self.new_amount)
+            )
+            await session.commit()
+        
+        # Log the change with violation warning
+        await economy_logger.log(
+            action=EconomyAction.ADMIN_ADD,
+            amount=self.injection_amount,
+            user_id=interaction.user.id,
+            user_name=interaction.user.display_name,
+            before_budget=self.old_amount,
+            after_budget=self.new_amount,
+            description=f"⚠️ ECONOMY VIOLATION: Admin set server budget (injection)",
+            details={
+                "Admin": f"<@{interaction.user.id}>",
+                "Old Budget": format_balance(self.old_amount),
+                "New Budget": format_balance(self.new_amount),
+                "Warning": "Closed-loop violation acknowledged"
+            },
+            source="Admin SetBudget (Violation)"
+        )
+        
+        metrics.update_server_budget(self.new_amount)
+        
+        # Disable all buttons
+        for child in self.children:
+            child.disabled = True
+        
+        result_embed = discord.Embed(
+            title="✅ Budget Updated",
+            description=f"Server budget set to **{format_balance(self.new_amount)}**",
+            color=0x00FF00
+        )
+        result_embed.add_field(name="Before", value=format_balance(self.old_amount), inline=True)
+        result_embed.add_field(name="After", value=format_balance(self.new_amount), inline=True)
+        result_embed.add_field(name="Change", value=f"+{format_balance(self.injection_amount)}", inline=True)
+        result_embed.set_footer(text="⚠️ This action has been logged as a closed-loop violation")
+        
+        await interaction.response.edit_message(embed=result_embed, view=self)
+    
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.admin_id:
+            return await interaction.response.send_message("❌ Only the original administrator can cancel this action.", ephemeral=True)
+        
+        for child in self.children:
+            child.disabled = True
+        
+        embed = discord.Embed(
+            title="✅ Action Cancelled",
+            description="Budget change was cancelled. The closed-loop economy remains intact.",
+            color=0x00FF00
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+
 class BudgetModal(discord.ui.Modal, title="Set Server Budget"):
     amount = discord.ui.TextInput(
         label="New Budget Amount ($)",
@@ -662,7 +1103,17 @@ class BudgetModal(discord.ui.Modal, title="Set Server Budget"):
             economy_before = await db.get_server_economy()
             old_budget = economy_before.total_budget
             
-            # Set budget directly
+            # If new budget is higher, show warning
+            if amount > old_budget:
+                warning_view = SetBudgetWarningView(amount, old_budget, interaction.user.id)
+                await interaction.response.send_message(
+                    embed=warning_view.get_warning_embed(),
+                    view=warning_view,
+                    ephemeral=True
+                )
+                return
+            
+            # If budget is lower or equal, proceed without warning (reducing is OK)
             async with db.session() as session:
                 from sqlalchemy import select, update
                 from src.models.database import ServerEconomy
@@ -728,6 +1179,131 @@ class BudgetModal(discord.ui.Modal, title="Set Server Budget"):
             pass
 
 
+class ClosedLoopViolationWarning(discord.ui.View):
+    """Warning view for budget injection confirmation - protects closed-loop economy"""
+    
+    def __init__(self, amount: float, admin_id: int, action_type: str = "add"):
+        super().__init__(timeout=60)
+        self.amount = amount
+        self.admin_id = admin_id
+        self.action_type = action_type
+        self.confirmed = False
+    
+    def get_warning_embed(self) -> discord.Embed:
+        """Generate the warning embed"""
+        embed = discord.Embed(
+            title="⚠️ CLOSED-LOOP ECONOMY VIOLATION WARNING",
+            color=0xFF0000
+        )
+        
+        embed.description = (
+            "**You are about to inject money into the economy from outside the system.**\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "🔴 **THIS ACTION VIOLATES THE FUNDAMENTAL PRINCIPLES OF THIS ECONOMIC SYSTEM**\n\n"
+            "This bot operates on a **closed-loop economy** model where:\n"
+            "• The total money supply remains **constant**\n"
+            "• Money only **circulates** between users and the server budget\n"
+            "• No currency is created or destroyed during normal operations\n"
+            "• All transactions (taxes, transfers, games) preserve the total sum\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "**By proceeding, you acknowledge that:**\n"
+            "```diff\n"
+            "- You are creating money from nothing\n"
+            "- This will cause economic inflation\n"
+            "- This action cannot be automatically reversed\n"
+            "- All budget modifications are permanently logged\n"
+            "```\n\n"
+            "**This feature should ONLY be used for:**\n"
+            "• Initial economy setup\n"
+            "• Critical error correction\n"
+            "• Database migration recovery\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
+        
+        embed.add_field(
+            name="💰 Requested Injection",
+            value=f"**{format_balance(self.amount)}**",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="👤 Administrator",
+            value=f"<@{self.admin_id}>",
+            inline=True
+        )
+        
+        embed.set_footer(text="⏱️ This confirmation expires in 60 seconds • Think carefully before proceeding")
+        return embed
+    
+    @discord.ui.button(label="I UNDERSTAND - PROCEED ANYWAY", style=discord.ButtonStyle.danger, emoji="⚠️")
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.admin_id:
+            return await interaction.response.send_message("❌ Only the original administrator can confirm this action.", ephemeral=True)
+        
+        self.confirmed = True
+        
+        # Actually perform the budget addition
+        economy_before = await db.get_server_economy()
+        budget_before = economy_before.total_budget
+        
+        success, new_budget = await db.update_server_budget(self.amount, add=True)
+        
+        if success:
+            # Log admin budget change with violation warning
+            await economy_logger.log(
+                action=EconomyAction.ADMIN_ADD,
+                amount=self.amount,
+                user_id=interaction.user.id,
+                user_name=interaction.user.display_name,
+                before_budget=budget_before,
+                after_budget=new_budget,
+                description=f"⚠️ ECONOMY VIOLATION: Admin injected money from outside system",
+                details={
+                    "Admin": f"<@{interaction.user.id}>",
+                    "Warning": "Closed-loop violation acknowledged"
+                },
+                source="Admin AddBudget (Violation)"
+            )
+            
+            metrics.update_server_budget(new_budget)
+            
+            # Disable all buttons
+            for child in self.children:
+                child.disabled = True
+            
+            result_embed = discord.Embed(
+                title="✅ Budget Injection Completed",
+                description=f"Added **{format_balance(self.amount)}** to server budget.",
+                color=0x00FF00
+            )
+            result_embed.add_field(name="Before", value=format_balance(budget_before), inline=True)
+            result_embed.add_field(name="After", value=format_balance(new_budget), inline=True)
+            result_embed.set_footer(text="⚠️ This action has been logged as a closed-loop violation")
+            
+            await interaction.response.edit_message(embed=result_embed, view=self)
+        else:
+            await interaction.response.send_message("❌ Failed to update budget!", ephemeral=True)
+    
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.admin_id:
+            return await interaction.response.send_message("❌ Only the original administrator can cancel this action.", ephemeral=True)
+        
+        for child in self.children:
+            child.disabled = True
+        
+        embed = discord.Embed(
+            title="✅ Action Cancelled",
+            description="Budget injection was cancelled. The closed-loop economy remains intact.",
+            color=0x00FF00
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+
 class AddBudgetModal(discord.ui.Modal, title="Add to Server Budget"):
     amount = discord.ui.TextInput(
         label="Amount to Add ($)",
@@ -739,36 +1315,21 @@ class AddBudgetModal(discord.ui.Modal, title="Add to Server Budget"):
         try:
             amount = float(self.amount.value)
             
-            economy_before = await db.get_server_economy()
-            budget_before = economy_before.total_budget
-            
-            success, new_budget = await db.update_server_budget(amount, add=True)
-            
-            if success:
-                # Log admin budget change
-                await economy_logger.log(
-                    action=EconomyAction.ADMIN_ADD,
-                    amount=amount,
-                    user_id=interaction.user.id,
-                    user_name=interaction.user.display_name,
-                    before_budget=budget_before,
-                    after_budget=new_budget,
-                    description=f"Admin added to server budget",
-                    details={"Admin": f"<@{interaction.user.id}>"},
-                    source="Admin AddBudget"
-                )
-                
+            if amount <= 0:
                 await interaction.response.send_message(
-                    f"✅ Added **{format_balance(amount)}** to budget.\n"
-                    f"New budget: **{format_balance(new_budget)}**",
+                    "❌ Amount must be positive!",
                     ephemeral=True
                 )
-                metrics.update_server_budget(new_budget)
-            else:
-                await interaction.response.send_message(
-                    "❌ Failed to update budget!",
-                    ephemeral=True
-                )
+                return
+            
+            # Show warning confirmation view instead of immediately adding
+            warning_view = ClosedLoopViolationWarning(amount, interaction.user.id, "add")
+            await interaction.response.send_message(
+                embed=warning_view.get_warning_embed(),
+                view=warning_view,
+                ephemeral=True
+            )
+            
         except ValueError:
             await interaction.response.send_message(
                 "❌ Invalid number!",

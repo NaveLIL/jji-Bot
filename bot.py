@@ -93,6 +93,7 @@ class JJIBot(commands.Bot):
             "src.cogs.marketplace",
             "src.cogs.officer",
             "src.cogs.admin",
+            "src.cogs.faq",
         ]
         
         for cog in cogs:
@@ -623,22 +624,50 @@ class JJIBot(commands.Bot):
                 self.logger.error(f"Failed to log member join: {e}")
     
     async def on_member_remove(self, member: discord.Member):
-        """Handle member leaving - deduct soldier value if was soldier"""
+        """Handle member leaving - deduct soldier value and optionally confiscate balance"""
         if member.bot:
             return
         
         config = self.config
         soldier_role_id = config.get("roles", {}).get("soldier")
+        member_leave_config = config.get("member_leave", {})
+        confiscate_balance = member_leave_config.get("confiscate_balance", True)
+        return_to_budget = member_leave_config.get("return_to_budget", True)
         
         # Check if they had soldier role
         had_soldier_role = soldier_role_id and any(r.id == soldier_role_id for r in member.roles)
         
+        economy = await db.get_server_economy()
+        soldier_value = economy.soldier_value if had_soldier_role else 0
+        confiscated_amount = 0
+        
+        # Confiscate user balance if enabled
+        if confiscate_balance:
+            user = await db.get_user(member.id)
+            if user and user.balance > 0:
+                confiscated_amount = user.balance
+                if return_to_budget:
+                    # Atomic: take user balance and add to budget
+                    result = await db.admin_adjust_balance_atomic(
+                        member.id,
+                        -confiscated_amount,
+                        TransactionType.CONFISCATE,
+                        description=f"Auto-confiscated on server leave"
+                    )
+                    if result["success"]:
+                        self.logger.info(f"Confiscated {format_balance(confiscated_amount)} from {member} on leave")
+                else:
+                    # Just zero out balance without returning to budget (money destroyed)
+                    async with db.session() as session:
+                        from sqlalchemy import update as sql_update
+                        await session.execute(
+                            sql_update(User).where(User.discord_id == member.id).values(balance=0)
+                        )
+                        await session.commit()
+        
         # If soldier left - deduct soldier value from budget
         # This is symmetric: /accept adds soldier_value, leaving removes it
         if had_soldier_role:
-            economy = await db.get_server_economy()
-            soldier_value = economy.soldier_value
-            
             await db.update_server_budget(-soldier_value)
             self.logger.info(f"Soldier left server: {member}, budget -{format_balance(soldier_value)}")
         
@@ -654,14 +683,22 @@ class JJIBot(commands.Bot):
                         color=0xFF0000,
                         timestamp=discord.utils.utcnow()
                     )
+                    
+                    impact_lines = []
                     if had_soldier_role:
-                        economy = await db.get_server_economy()
+                        impact_lines.append(f"Soldier value: -{format_balance(soldier_value)}")
+                    if confiscated_amount > 0:
+                        impact_lines.append(f"Confiscated balance: +{format_balance(confiscated_amount)}")
+                    
+                    if impact_lines:
+                        net_impact = confiscated_amount - soldier_value
+                        net_str = f"+{format_balance(net_impact)}" if net_impact >= 0 else format_balance(net_impact)
                         embed.add_field(
                             name="💰 Budget Impact",
-                            value=f"-{format_balance(economy.soldier_value)}",
+                            value="\n".join(impact_lines) + f"\n**Net:** {net_str}",
                             inline=True
                         )
-                        embed.set_footer(text="Soldier value deducted from server budget")
+                        embed.set_footer(text="Balance confiscated and returned to server budget")
                     await channel.send(embed=embed)
             except Exception as e:
                 self.logger.error(f"Failed to log member leave: {e}")

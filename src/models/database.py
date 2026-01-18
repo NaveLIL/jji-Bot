@@ -405,3 +405,60 @@ class BotStats(Base):
     stat_name: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
     stat_value: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     last_updated: Mapped[datetime] = mapped_column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+# ==================== FAQ/REFERENCE SYSTEM ====================
+
+class FAQPanel(Base):
+    """Published FAQ panels with interactive selectors"""
+    __tablename__ = "faq_panels"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)  # Unique per guild, not globally
+    title: Mapped[str] = mapped_column(String(256), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=True)
+    color: Mapped[int] = mapped_column(Integer, default=0x2F3136, nullable=False)
+    footer_text: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    thumbnail_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    channel_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_by: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+    
+    # Relationships
+    entries: Mapped[List["FAQEntry"]] = relationship("FAQEntry", back_populates="panel", cascade="all, delete-orphan", order_by="FAQEntry.order_index")
+    
+    __table_args__ = (
+        Index('idx_faq_panel_message', 'message_id', 'channel_id'),
+        Index('idx_faq_panel_guild', 'guild_id'),
+        UniqueConstraint('name', 'guild_id', name='uq_faq_panel_name_guild'),  # Unique per guild
+    )
+    
+    def __repr__(self) -> str:
+        return f"<FAQPanel(name={self.name}, title={self.title})>"
+
+
+class FAQEntry(Base):
+    """Individual FAQ entries/categories within a panel"""
+    __tablename__ = "faq_entries"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    panel_id: Mapped[int] = mapped_column(Integer, ForeignKey("faq_panels.id", ondelete="CASCADE"), nullable=False)
+    label: Mapped[str] = mapped_column(String(100), nullable=False)  # Shown in selector
+    emoji: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)  # Optional emoji for selector
+    content: Mapped[str] = mapped_column(Text, nullable=False)  # The response content (supports markdown)
+    order_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)  # For ordering in selector
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+    
+    # Relationships
+    panel: Mapped["FAQPanel"] = relationship("FAQPanel", back_populates="entries")
+    
+    __table_args__ = (
+        Index('idx_faq_entry_panel', 'panel_id', 'order_index'),
+    )
+    
+    def __repr__(self) -> str:
+        return f"<FAQEntry(label={self.label}, panel_id={self.panel_id})>"

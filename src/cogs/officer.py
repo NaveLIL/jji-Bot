@@ -98,6 +98,27 @@ class OfficerCog(commands.Cog):
         # Log the recruitment
         await db.log_officer_accept(interaction.user.id, recruit.id)
         
+        # Add soldier value to server budget (new soldier = more budget)
+        economy = await db.get_server_economy()
+        soldier_value = economy.soldier_value
+        await db.update_server_budget(soldier_value)
+        
+        # Log soldier value addition
+        economy_after_soldier = await db.get_server_economy()
+        await economy_logger.log(
+            action=EconomyAction.BUDGET_ADD,
+            amount=soldier_value,
+            before_budget=economy.total_budget,
+            after_budget=economy_after_soldier.total_budget,
+            description=f"New soldier accepted: {recruit.display_name}",
+            details={
+                "Soldier Value": f"${soldier_value:,.2f}",
+                "Officer": interaction.user.mention,
+                "Recruit": recruit.mention
+            },
+            source="Officer Accept"
+        )
+        
         # Calculate tax on officer reward
         economy = await db.get_server_economy()
         officer = await db.get_or_create_user(interaction.user.id)

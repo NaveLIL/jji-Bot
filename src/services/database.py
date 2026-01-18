@@ -2284,6 +2284,421 @@ class DatabaseService:
             stat = result.scalar_one_or_none()
             return stat.stat_value if stat else None
 
+    # ==================== FAQ SYSTEM ====================
+    
+    async def create_faq_panel(
+        self,
+        name: str,
+        title: str,
+        guild_id: int,
+        created_by: int,
+        description: str = None,
+        color: int = 0x3498DB,
+        footer_text: str = None,
+        thumbnail_url: str = None
+    ) -> dict:
+        """Create a new FAQ panel"""
+        from src.models.database import FAQPanel
+        
+        async with self.session() as session:
+            # Check if name already exists for this guild
+            result = await session.execute(
+                select(FAQPanel).where(
+                    FAQPanel.name == name,
+                    FAQPanel.guild_id == guild_id
+                )
+            )
+            if result.scalar_one_or_none():
+                return {"success": False, "error": f"Panel with name '{name}' already exists"}
+            
+            panel = FAQPanel(
+                name=name,
+                title=title,
+                description=description,
+                color=color,
+                footer_text=footer_text,
+                thumbnail_url=thumbnail_url,
+                guild_id=guild_id,
+                created_by=created_by
+            )
+            session.add(panel)
+            await session.commit()
+            await session.refresh(panel)
+            
+            return {
+                "success": True,
+                "panel": {
+                    "id": panel.id,
+                    "name": panel.name,
+                    "title": panel.title
+                }
+            }
+    
+    async def get_faq_panel_by_name(self, name: str, guild_id: int) -> Optional[dict]:
+        """Get a FAQ panel by name"""
+        from src.models.database import FAQPanel, FAQEntry
+        
+        async with self.session() as session:
+            result = await session.execute(
+                select(FAQPanel).where(
+                    FAQPanel.name == name,
+                    FAQPanel.guild_id == guild_id
+                )
+            )
+            panel = result.scalar_one_or_none()
+            
+            if not panel:
+                return None
+            
+            # Count entries
+            entry_count = await session.execute(
+                select(func.count(FAQEntry.id)).where(FAQEntry.panel_id == panel.id)
+            )
+            
+            return {
+                "id": panel.id,
+                "name": panel.name,
+                "title": panel.title,
+                "description": panel.description,
+                "color": panel.color,
+                "footer_text": panel.footer_text,
+                "thumbnail_url": panel.thumbnail_url,
+                "message_id": panel.message_id,
+                "channel_id": panel.channel_id,
+                "guild_id": panel.guild_id,
+                "entry_count": entry_count.scalar() or 0
+            }
+    
+    async def get_faq_panel_by_id(self, panel_id: int) -> Optional[dict]:
+        """Get a FAQ panel by ID"""
+        from src.models.database import FAQPanel
+        
+        async with self.session() as session:
+            result = await session.execute(
+                select(FAQPanel).where(FAQPanel.id == panel_id)
+            )
+            panel = result.scalar_one_or_none()
+            
+            if not panel:
+                return None
+            
+            return {
+                "id": panel.id,
+                "name": panel.name,
+                "title": panel.title,
+                "description": panel.description,
+                "color": panel.color,
+                "footer_text": panel.footer_text,
+                "thumbnail_url": panel.thumbnail_url,
+                "message_id": panel.message_id,
+                "channel_id": panel.channel_id,
+                "guild_id": panel.guild_id
+            }
+    
+    async def get_all_faq_panels(self, guild_id: int) -> List[dict]:
+        """Get all FAQ panels for a guild"""
+        from src.models.database import FAQPanel, FAQEntry
+        
+        async with self.session() as session:
+            result = await session.execute(
+                select(FAQPanel).where(FAQPanel.guild_id == guild_id)
+                .order_by(FAQPanel.created_at.desc())
+            )
+            panels = result.scalars().all()
+            
+            panel_list = []
+            for panel in panels:
+                # Count entries
+                entry_count = await session.execute(
+                    select(func.count(FAQEntry.id)).where(FAQEntry.panel_id == panel.id)
+                )
+                
+                panel_list.append({
+                    "id": panel.id,
+                    "name": panel.name,
+                    "title": panel.title,
+                    "message_id": panel.message_id,
+                    "channel_id": panel.channel_id,
+                    "entry_count": entry_count.scalar() or 0
+                })
+            
+            return panel_list
+    
+    async def get_all_published_faq_panels(self) -> List[dict]:
+        """Get all published FAQ panels (for persistent view registration)"""
+        from src.models.database import FAQPanel
+        
+        async with self.session() as session:
+            result = await session.execute(
+                select(FAQPanel).where(FAQPanel.message_id.isnot(None))
+            )
+            panels = result.scalars().all()
+            
+            return [
+                {
+                    "id": panel.id,
+                    "name": panel.name,
+                    "message_id": panel.message_id,
+                    "channel_id": panel.channel_id
+                }
+                for panel in panels
+            ]
+    
+    async def update_faq_panel(
+        self,
+        panel_id: int,
+        title: str = None,
+        description: str = None,
+        color: int = None,
+        footer_text: str = None,
+        thumbnail_url: str = None
+    ) -> dict:
+        """Update a FAQ panel"""
+        from src.models.database import FAQPanel
+        
+        async with self.session() as session:
+            result = await session.execute(
+                select(FAQPanel).where(FAQPanel.id == panel_id)
+            )
+            panel = result.scalar_one_or_none()
+            
+            if not panel:
+                return {"success": False, "error": "Panel not found"}
+            
+            if title is not None:
+                panel.title = title
+            if description is not None:
+                panel.description = description
+            if color is not None:
+                panel.color = color
+            if footer_text is not None:
+                panel.footer_text = footer_text
+            if thumbnail_url is not None:
+                panel.thumbnail_url = thumbnail_url
+            
+            await session.commit()
+            
+            return {
+                "success": True,
+                "panel": {
+                    "id": panel.id,
+                    "name": panel.name,
+                    "message_id": panel.message_id
+                }
+            }
+    
+    async def update_faq_panel_message(
+        self,
+        panel_id: int,
+        message_id: int,
+        channel_id: int
+    ) -> dict:
+        """Update FAQ panel message location"""
+        from src.models.database import FAQPanel
+        
+        async with self.session() as session:
+            result = await session.execute(
+                select(FAQPanel).where(FAQPanel.id == panel_id)
+            )
+            panel = result.scalar_one_or_none()
+            
+            if not panel:
+                return {"success": False, "error": "Panel not found"}
+            
+            panel.message_id = message_id
+            panel.channel_id = channel_id
+            
+            await session.commit()
+            return {"success": True}
+    
+    async def delete_faq_panel(self, panel_id: int) -> dict:
+        """Delete a FAQ panel and all its entries"""
+        from src.models.database import FAQPanel
+        
+        async with self.session() as session:
+            result = await session.execute(
+                select(FAQPanel).where(FAQPanel.id == panel_id)
+            )
+            panel = result.scalar_one_or_none()
+            
+            if not panel:
+                return {"success": False, "error": "Panel not found"}
+            
+            await session.delete(panel)
+            await session.commit()
+            return {"success": True}
+    
+    async def add_faq_entry(
+        self,
+        panel_id: int,
+        label: str,
+        content: str,
+        emoji: str = None
+    ) -> dict:
+        """Add an entry to a FAQ panel"""
+        from src.models.database import FAQPanel, FAQEntry
+        
+        async with self.session() as session:
+            # Verify panel exists
+            panel_result = await session.execute(
+                select(FAQPanel).where(FAQPanel.id == panel_id)
+            )
+            if not panel_result.scalar_one_or_none():
+                return {"success": False, "error": "Panel not found"}
+            
+            # Get max order index
+            max_order = await session.execute(
+                select(func.max(FAQEntry.order_index))
+                .where(FAQEntry.panel_id == panel_id)
+            )
+            next_order = (max_order.scalar() or -1) + 1
+            
+            entry = FAQEntry(
+                panel_id=panel_id,
+                label=label,
+                content=content,
+                emoji=emoji,
+                order_index=next_order
+            )
+            session.add(entry)
+            await session.commit()
+            await session.refresh(entry)
+            
+            return {
+                "success": True,
+                "entry": {
+                    "id": entry.id,
+                    "label": entry.label,
+                    "order_index": entry.order_index
+                }
+            }
+    
+    async def get_faq_entries(self, panel_id: int) -> List[dict]:
+        """Get all entries for a FAQ panel"""
+        from src.models.database import FAQEntry
+        
+        async with self.session() as session:
+            result = await session.execute(
+                select(FAQEntry)
+                .where(FAQEntry.panel_id == panel_id)
+                .order_by(FAQEntry.order_index)
+            )
+            entries = result.scalars().all()
+            
+            return [
+                {
+                    "id": entry.id,
+                    "label": entry.label,
+                    "emoji": entry.emoji,
+                    "content": entry.content,
+                    "order_index": entry.order_index
+                }
+                for entry in entries
+            ]
+    
+    async def get_faq_entry(self, entry_id: int) -> Optional[dict]:
+        """Get a single FAQ entry"""
+        from src.models.database import FAQEntry
+        
+        async with self.session() as session:
+            result = await session.execute(
+                select(FAQEntry).where(FAQEntry.id == entry_id)
+            )
+            entry = result.scalar_one_or_none()
+            
+            if not entry:
+                return None
+            
+            return {
+                "id": entry.id,
+                "panel_id": entry.panel_id,
+                "label": entry.label,
+                "emoji": entry.emoji,
+                "content": entry.content,
+                "order_index": entry.order_index
+            }
+    
+    async def update_faq_entry(
+        self,
+        entry_id: int,
+        label: str = None,
+        content: str = None,
+        emoji: str = None
+    ) -> dict:
+        """Update a FAQ entry"""
+        from src.models.database import FAQEntry
+        
+        async with self.session() as session:
+            result = await session.execute(
+                select(FAQEntry).where(FAQEntry.id == entry_id)
+            )
+            entry = result.scalar_one_or_none()
+            
+            if not entry:
+                return {"success": False, "error": "Entry not found"}
+            
+            if label is not None:
+                entry.label = label
+            if content is not None:
+                entry.content = content
+            if emoji is not None:
+                entry.emoji = emoji if emoji else None
+            
+            await session.commit()
+            return {"success": True}
+    
+    async def delete_faq_entry(self, entry_id: int) -> dict:
+        """Delete a FAQ entry"""
+        from src.models.database import FAQEntry
+        
+        async with self.session() as session:
+            result = await session.execute(
+                select(FAQEntry).where(FAQEntry.id == entry_id)
+            )
+            entry = result.scalar_one_or_none()
+            
+            if not entry:
+                return {"success": False, "error": "Entry not found"}
+            
+            await session.delete(entry)
+            await session.commit()
+            return {"success": True}
+    
+    async def reorder_faq_entry(self, entry_id: int, new_order: int) -> dict:
+        """Reorder a FAQ entry"""
+        from src.models.database import FAQEntry
+        
+        async with self.session() as session:
+            result = await session.execute(
+                select(FAQEntry).where(FAQEntry.id == entry_id)
+            )
+            entry = result.scalar_one_or_none()
+            
+            if not entry:
+                return {"success": False, "error": "Entry not found"}
+            
+            # Get all entries for this panel
+            all_entries = await session.execute(
+                select(FAQEntry)
+                .where(FAQEntry.panel_id == entry.panel_id)
+                .order_by(FAQEntry.order_index)
+            )
+            entries = list(all_entries.scalars().all())
+            
+            # Remove target entry from list
+            entries = [e for e in entries if e.id != entry_id]
+            
+            # Insert at new position
+            new_order = max(0, min(new_order, len(entries)))
+            entries.insert(new_order, entry)
+            
+            # Update all order indices
+            for i, e in enumerate(entries):
+                e.order_index = i
+            
+            await session.commit()
+            return {"success": True}
+
 
 # Global database instance
 db = DatabaseService()

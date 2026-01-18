@@ -1117,19 +1117,9 @@ class GamesCog(commands.Cog):
             updated = True
         elif action == "double":
             game.double(user_id)
-            # Update local bet amount for accurate payout calculation
-            if user_id == game.player_a_id:
-                game.player_a_bet += check_funds_amount
-            elif user_id == game.player_b_id:
-                game.player_b_bet += check_funds_amount
             updated = True
         elif action == "split":
             game.split(user_id)
-            # Update local bet amount for accurate payout calculation
-            if user_id == game.player_a_id:
-                game.player_a_bet += check_funds_amount
-            elif user_id == game.player_b_id:
-                game.player_b_bet += check_funds_amount
             updated = True
             
         if updated:
@@ -1171,38 +1161,25 @@ class GamesCog(commands.Cog):
             
             # If Complete, Payout
             if game.state == GameState.COMPLETE:
+                # Fetch updated session to get correct bet amounts (after doubles/splits)
+                updated_session = await db.get_pvp_game_session(game_id)
+                if updated_session:
+                    # Use bet amounts from DB which include doubles/splits
+                    actual_bet_a = updated_session.player_a_bet
+                    actual_bet_b = updated_session.player_b_bet
+                else:
+                    # Fallback to game values
+                    actual_bet_a = game.player_a_bet
+                    actual_bet_b = game.player_b_bet
+                
                 # Construct results dict {uid: profit}
-                # profit = payout - bet
-                # The resolve_pvp_payout method expects 'net_profit_excluding_stake'
-
-                # Our game.results is {uid: [(Result, Payout_Amount), ...]}
-                # Payout_Amount includes the stake return.
-                # So if I bet 100 and win (200 returned), logic result is 200.
-                # Net profit is 100.
-                # resolve_pvp_payout adds net_profit to base_bet.
-
-                # Wait, resolve_pvp_payout logic:
-                # base_return = bet_amount + raw_profit
-                # if I win 200 total (100 bet + 100 win), raw_profit should be 100.
-
-                # game.results returns total payout amount.
-                # So raw_profit = payout - original_bet.
-
+                # game.results contains net profit/loss amounts:
+                # Win: +amount (profit), Lose: -amount (loss), Push: 0
                 payout_map = {}
 
                 # Player A
                 if game.player_a_id in game.results:
                     total_payout_a = sum(amount for _, amount in game.results[game.player_a_id])
-                    # Note: game results returns signed amounts.
-                    # Win: +bet (profit only? No, let's check logic)
-
-                    # logic: results.append((HandResult.WIN, hand.bet * multiplier))
-                    # If I bet 100, WIN returns 100.
-                    # If I get BJ, BLACKJACK returns 150.
-                    # If I LOSE, returns -100.
-                    # If PUSH, returns 0.
-
-                    # So game.results IS the net profit!
                     payout_map[game.player_a_id] = total_payout_a
 
                 # Player B
@@ -1213,8 +1190,8 @@ class GamesCog(commands.Cog):
                 await db.resolve_pvp_payout(
                     player_a_id=game.player_a_id,
                     player_b_id=game.player_b_id,
-                    player_a_bet=game.player_a_bet,
-                    player_b_bet=game.player_b_bet,
+                    player_a_bet=actual_bet_a,
+                    player_b_bet=actual_bet_b,
                     results=payout_map
                 )
 
