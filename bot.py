@@ -150,7 +150,50 @@ class JJIBot(commands.Bot):
                 name="JJI Squad"
             )
         )
+
+        # Sync roles
+        await self.sync_roles()
     
+    async def sync_roles(self):
+        """Sync user roles from Discord to Database on startup"""
+        self.logger.info("Syncing roles...")
+        config = self.config
+        guild_id = config.get("guild_id")
+
+        if not guild_id:
+            self.logger.warning("No guild_id in config, skipping role sync")
+            return
+
+        guild = self.get_guild(guild_id)
+        if not guild:
+            self.logger.warning(f"Guild {guild_id} not found, skipping role sync")
+            return
+
+        soldier_role_id = config.get("roles", {}).get("soldier")
+        sergeant_role_id = config.get("roles", {}).get("sergeant")
+        officer_role_id = config.get("roles", {}).get("officer")
+
+        count = 0
+        for member in guild.members:
+            if member.bot:
+                continue
+
+            roles = set(r.id for r in member.roles)
+            is_soldier = soldier_role_id in roles if soldier_role_id else False
+            is_sergeant = sergeant_role_id in roles if sergeant_role_id else False
+            is_officer = officer_role_id in roles if officer_role_id else False
+
+            if is_soldier or is_sergeant or is_officer:
+                await db.update_user_roles(
+                    member.id,
+                    is_officer=is_officer,
+                    is_sergeant=is_sergeant,
+                    is_soldier=is_soldier
+                )
+                count += 1
+
+        self.logger.info(f"Synced roles for {count} members")
+
     async def on_voice_state_update(
         self,
         member: discord.Member,
@@ -513,8 +556,9 @@ class JJIBot(commands.Bot):
                 soldier_value = economy.soldier_value
                 
                 if not was_soldier and is_soldier:
-                    # Got soldier role - no budget change (closed-loop economy)
-                    self.logger.info(f"New soldier: {after}")
+                    # Got soldier role - add soldier value to budget
+                    await db.update_server_budget(soldier_value)
+                    self.logger.info(f"New soldier: {after}, budget +{format_balance(soldier_value)}")
                     
                     # Log to recruit channel
                     log_channel_id = config.get("channels", {}).get("log_recruit")
@@ -713,20 +757,18 @@ class JJIBot(commands.Bot):
         mute_config = config.get("mute_penalty", {})
         mute_penalty_enabled = mute_config.get("enabled", True)
         
-        # Check prime time - if not prime time, no salaries
+        # Check prime time
         is_prime = is_prime_time(
             prime_time.get("start_hour", 14),
             prime_time.get("end_hour", 22)
         )
-        if not is_prime:
-            return
         
-        # Prime time 2x multiplier
-        prime_multiplier = 2.0
+        # Prime time 2x multiplier, otherwise 1x
+        prime_multiplier = 2.0 if is_prime else 1.0
         
         salaries = config.get("salaries", {})
         # Apply prime time multiplier to all rates
-        soldier_rate = (salaries.get("soldier_per_10min", 10) / 10) * prime_multiplier  # Per minute with 2x
+        soldier_rate = (salaries.get("soldier_per_10min", 10) / 10) * prime_multiplier  # Per minute
         sergeant_rate = (salaries.get("sergeant_per_10min", 20) / 10) * prime_multiplier
         officer_rate = (salaries.get("officer_per_10min", 20) / 10) * prime_multiplier
         
@@ -776,7 +818,7 @@ class JJIBot(commands.Bot):
                             voice_state = member.voice
                             is_voice_muted = voice_state and (voice_state.mute or voice_state.self_mute)
                             
-                            if is_timed_out:
+                            if is_timed_out or is_voice_muted:
                                 skipped_muted += 1
                                 continue  # Skip muted users - no salary
                     except Exception:
@@ -827,7 +869,7 @@ class JJIBot(commands.Bot):
                     tax_amount=tax_amount,
                     before_balance=user_before,
                     after_balance=locked_user.balance,
-                    description=f"SB time salary (Prime Time 2x)"
+                    description=f"SB time salary ({'Prime Time 2x' if is_prime else 'Standard 1x'})"
                 )
                 session.add(transaction)
 
@@ -845,7 +887,8 @@ class JJIBot(commands.Bot):
                 economy.total_rewards_paid += total_paid
                 economy.total_budget -= total_paid
 
-                self.logger.debug(f"Distributed salaries: {format_balance(total_paid)} (Prime Time 2x)")
+                multiplier_text = "Prime Time 2x" if is_prime else "Standard 1x"
+                self.logger.debug(f"Distributed salaries: {format_balance(total_paid)} ({multiplier_text})")
 
                 # Log salary distribution (aggregate)
                 await economy_logger.log(
@@ -853,13 +896,13 @@ class JJIBot(commands.Bot):
                     amount=total_paid,
                     before_budget=budget_before,
                     after_budget=economy.total_budget,
-                    description=f"Salary paid to {len(paid_users)} users (Prime Time 2x)",
+                    description=f"Salary paid to {len(paid_users)} users ({multiplier_text})",
                     details={
                         "Total Net Paid": f"${total_paid:,.2f}",
                         "Total Tax Kept": f"${total_tax:,.2f}",
                         "Users Paid": len(paid_users),
                         "Muted Skipped": skipped_muted,
-                        "Prime Time Multiplier": "2x"
+                        "Multiplier": multiplier_text
                     },
                     source="SalaryTask"
                 )
