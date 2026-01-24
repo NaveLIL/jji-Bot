@@ -394,7 +394,28 @@ class MarketplaceCog(commands.Cog):
         
         role = await db.get_role(discord_id=role_id)
         if not role:
-            return await interaction.followup.send("❌ Role not found!", ephemeral=True)
+            return await interaction.followup.send("❌ Role not found in shop!", ephemeral=True)
+        
+        # VALIDATION FIRST: Check Discord role exists and bot can assign it
+        member = interaction.guild.get_member(interaction.user.id)
+        discord_role = interaction.guild.get_role(role_id)
+        
+        if not discord_role:
+            return await interaction.followup.send(
+                "❌ This role no longer exists on the server. Please contact an admin.",
+                ephemeral=True
+            )
+        
+        if not member:
+            return await interaction.followup.send("❌ Could not find your member data.", ephemeral=True)
+        
+        # Check bot can assign the role (role hierarchy)
+        bot_member = interaction.guild.get_member(interaction.client.user.id)
+        if bot_member and discord_role >= bot_member.top_role:
+            return await interaction.followup.send(
+                "❌ Bot cannot assign this role (role hierarchy issue). Contact an admin.",
+                ephemeral=True
+            )
         
         user = await db.get_user(interaction.user.id)
         economy = await db.get_server_economy()
@@ -409,23 +430,7 @@ class MarketplaceCog(commands.Cog):
                 ephemeral=True
             )
         
-        # Remove old color role
-        user_roles = await db.get_user_roles(interaction.user.id)
-        member = interaction.guild.get_member(interaction.user.id)
-        replaced_role = None
-        
-        for ur in user_roles:
-            if ur.role.role_type == RoleType.COLOR:
-                replaced_role = ur.role.name
-                old_role = interaction.guild.get_role(ur.role.discord_id)
-                if member and old_role and old_role in member.roles:
-                    try:
-                        await member.remove_roles(old_role)
-                    except:
-                        pass
-                await db.sell_role(interaction.user.id, ur.role.discord_id, refund_percentage=0)
-        
-        # Buy new role with tax atomically
+        # Buy new role with tax atomically FIRST (before removing old one)
         success, msg, actual_tax = await db.purchase_role_with_tax(
             interaction.user.id, 
             role_id,
@@ -434,14 +439,37 @@ class MarketplaceCog(commands.Cog):
         if not success:
             return await interaction.followup.send(f"❌ {msg}", ephemeral=True)
         
-        # Assign role
-        discord_role = interaction.guild.get_role(role_id)
-        if member and discord_role:
-            try:
-                await member.add_roles(discord_role)
-                await db.toggle_role_active(interaction.user.id, role_id)
-            except:
-                pass
+        # Purchase succeeded - now remove old color role (no refund, just removal)
+        user_roles = await db.get_user_roles(interaction.user.id)
+        replaced_role = None
+        
+        for ur in user_roles:
+            if ur.role.role_type == RoleType.COLOR and ur.role.discord_id != role_id:
+                replaced_role = ur.role.name
+                old_discord_role = interaction.guild.get_role(ur.role.discord_id)
+                if old_discord_role and old_discord_role in member.roles:
+                    try:
+                        await member.remove_roles(old_discord_role)
+                    except Exception as e:
+                        logger.warning(f"Failed to remove old color role: {e}")
+                # Remove from DB (no refund since they're replacing, not selling)
+                await db.sell_role(interaction.user.id, ur.role.discord_id, refund_percentage=0)
+        
+        # Assign new Discord role
+        try:
+            await member.add_roles(discord_role)
+            await db.toggle_role_active(interaction.user.id, role_id)
+        except discord.Forbidden:
+            logger.error(f"Failed to assign role {role.name} - permission denied")
+            # Role purchase is in DB but Discord assignment failed
+            # We still log it but warn the user
+            await interaction.followup.send(
+                f"⚠️ Purchased **{role.name}** but failed to assign it. Contact an admin to fix.",
+                ephemeral=True
+            )
+            return
+        except Exception as e:
+            logger.error(f"Failed to assign role {role.name}: {e}")
         
         # Log shop purchase
         user_after = await db.get_user(interaction.user.id)
@@ -469,7 +497,28 @@ class MarketplaceCog(commands.Cog):
         
         role = await db.get_role(discord_id=role_id)
         if not role:
-            return await interaction.followup.send("❌ Role not found!", ephemeral=True)
+            return await interaction.followup.send("❌ Role not found in shop!", ephemeral=True)
+        
+        # VALIDATION FIRST: Check Discord role exists and bot can assign it
+        member = interaction.guild.get_member(interaction.user.id)
+        discord_role = interaction.guild.get_role(role_id)
+        
+        if not discord_role:
+            return await interaction.followup.send(
+                "❌ This role no longer exists on the server. Please contact an admin.",
+                ephemeral=True
+            )
+        
+        if not member:
+            return await interaction.followup.send("❌ Could not find your member data.", ephemeral=True)
+        
+        # Check bot can assign the role (role hierarchy)
+        bot_member = interaction.guild.get_member(interaction.client.user.id)
+        if bot_member and discord_role >= bot_member.top_role:
+            return await interaction.followup.send(
+                "❌ Bot cannot assign this role (role hierarchy issue). Contact an admin.",
+                ephemeral=True
+            )
         
         user = await db.get_user(interaction.user.id)
         economy = await db.get_server_economy()
@@ -500,15 +549,19 @@ class MarketplaceCog(commands.Cog):
         if not success:
             return await interaction.followup.send(f"❌ {msg}", ephemeral=True)
         
-        # Assign role
-        member = interaction.guild.get_member(interaction.user.id)
-        discord_role = interaction.guild.get_role(role_id)
-        if member and discord_role:
-            try:
-                await member.add_roles(discord_role)
-                await db.toggle_role_active(interaction.user.id, role_id)
-            except:
-                pass
+        # Assign Discord role
+        try:
+            await member.add_roles(discord_role)
+            await db.toggle_role_active(interaction.user.id, role_id)
+        except discord.Forbidden:
+            logger.error(f"Failed to assign role {role.name} - permission denied")
+            await interaction.followup.send(
+                f"⚠️ Purchased **{role.name}** but failed to assign it. Contact an admin to fix.",
+                ephemeral=True
+            )
+            return
+        except Exception as e:
+            logger.error(f"Failed to assign role {role.name}: {e}")
         
         # Log shop purchase
         user_after = await db.get_user(interaction.user.id)
