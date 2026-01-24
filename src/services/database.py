@@ -788,8 +788,8 @@ class DatabaseService:
                 "tax": tax_amount
             }
     
-    async def add_taxes_collected(self, amount: float) -> None:
-        """Add to total taxes collected"""
+    async def add_taxes_collected(self, amount: float, add_to_budget: bool = True) -> None:
+        """Add to total taxes collected. Option to skip adding to budget (if already there)."""
         async with self.session() as session:
             result = await session.execute(
                 select(ServerEconomy).with_for_update()
@@ -798,7 +798,8 @@ class DatabaseService:
             
             if economy:
                 economy.total_taxes_collected += amount
-                economy.total_budget += amount
+                if add_to_budget:
+                    economy.total_budget += amount
                 await session.commit()
     
     async def add_rewards_paid(self, amount: float) -> None:

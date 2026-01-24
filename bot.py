@@ -94,6 +94,7 @@ class JJIBot(commands.Bot):
             "src.cogs.officer",
             "src.cogs.admin",
             "src.cogs.faq",
+            "src.cogs.logger",
         ]
         
         for cog in cogs:

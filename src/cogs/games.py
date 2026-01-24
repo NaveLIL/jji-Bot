@@ -313,7 +313,9 @@ class EnhancedBlackjackView(discord.ui.View):
                 )
                 
                 if tax > 0:
-                    await db.add_taxes_collected(tax)
+                    # Tax is already in budget (since we deducted net_payout from budget, implying we kept the tax)
+                    # So we only record the stat, do NOT add to budget again
+                    await db.add_taxes_collected(tax, add_to_budget=False)
                     metrics.track_tax(tax)
                 
                 metrics.track_game("blackjack", "win", total_bet)

@@ -554,18 +554,19 @@ class FAQCog(commands.Cog):
         # Build view
         view = FAQPanelView(panel["id"], entries, placeholder="📖 Select a topic...")
         
+        # Send new message FIRST to ensure delivery
+        message = await target_channel.send(embed=embed, view=view)
+        
         # Delete old message if exists
         if panel.get("message_id") and panel.get("channel_id"):
             try:
                 old_channel = self.bot.get_channel(panel["channel_id"])
-                if old_channel:
+                # Don't delete if we just updated the same message (shouldn't happen with send(), but good safety)
+                if old_channel and not (old_channel.id == target_channel.id and panel["message_id"] == message.id):
                     old_message = await old_channel.fetch_message(panel["message_id"])
                     await old_message.delete()
             except:
                 pass
-        
-        # Send new message
-        message = await target_channel.send(embed=embed, view=view)
         
         # Update panel with message info
         await db.update_faq_panel_message(
