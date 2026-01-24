@@ -21,36 +21,64 @@ logger = logging.getLogger(__name__)
 
 MAX_COLOR_ROLES = 1
 MAX_NAME_ROLES = 5
+ITEMS_PER_PAGE = 20
+
+
+class SearchRoleModal(discord.ui.Modal, title="Search Roles"):
+    """Modal to enter search query"""
+    
+    query = discord.ui.TextInput(
+        label="Search Query",
+        placeholder="e.g. Red, Dragon, Elite...",
+        min_length=1,
+        max_length=50,
+        required=True
+    )
+    
+    def __init__(self, view: "ShopView"):
+        super().__init__()
+        self.view = view
+        
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        self.view.search_query = self.query.value.lower()
+        self.view.current_page = 0  # Reset to first page on new search
+        self.view._build_view()
+        await interaction.edit_original_response(embed=self.view.build_embed(), view=self.view)
 
 
 class RoleBuySelect(discord.ui.Select):
     """Dropdown for selecting a role to buy"""
     
-    def __init__(self, cog: "MarketplaceCog", roles: List[Role], owned_ids: set, role_type: RoleType, owned_count: int):
+    def __init__(self, cog: "MarketplaceCog", visible_roles: List[Role], owned_ids: set, role_type: RoleType, owned_count: int, total_count: int):
         self.cog = cog
         self.role_type = role_type
-        self.available = [r for r in roles if r.discord_id not in owned_ids]
         
         options = []
-        for role in self.available[:25]:
+        # visible_roles is already paginated and filtered
+        for role in visible_roles:
+            is_owned = role.discord_id in owned_ids
+            label = role.name[:90]
+            if is_owned:
+                label += " (Owned)"
+                
             options.append(discord.SelectOption(
-                label=role.name[:100],
+                label=label,
                 value=str(role.discord_id),
-                description=f"💰 {format_balance(role.price)}"
+                description=f"💰 {format_balance(role.price)}",
+                emoji="✅" if is_owned else None
             ))
         
         if role_type == RoleType.COLOR:
-            max_allowed = MAX_COLOR_ROLES
             emoji = "🎨"
             if not options:
-                placeholder = "No color roles available"
+                placeholder = "No color roles found"
             else:
                 placeholder = "🎨 Select a color role to buy..."
         else:
-            max_allowed = MAX_NAME_ROLES
             emoji = "📛"
             if not options:
-                placeholder = "No name roles available"
+                placeholder = "No name roles found"
             elif owned_count >= MAX_NAME_ROLES:
                 placeholder = f"❌ Max {MAX_NAME_ROLES} roles reached"
             else:
@@ -59,7 +87,7 @@ class RoleBuySelect(discord.ui.Select):
         disabled = not options or (role_type == RoleType.NAME and owned_count >= MAX_NAME_ROLES)
         
         if not options:
-            options = [discord.SelectOption(label="None available", value="none")]
+            options = [discord.SelectOption(label="No roles found", value="none")]
         
         super().__init__(
             placeholder=placeholder,
@@ -103,17 +131,40 @@ class ShopView(discord.ui.View):
         self.tax_rate = tax_rate
         self.current_tab = current_tab
         
+        self.current_page = 0
+        self.search_query = ""
+        
         self.owned_ids = {ur.role.discord_id for ur in user_roles}
         self.owned_color = [ur for ur in user_roles if ur.role.role_type == RoleType.COLOR]
         self.owned_name = [ur for ur in user_roles if ur.role.role_type == RoleType.NAME]
         
         self._build_view()
     
+    def _get_filtered_roles(self) -> List[Role]:
+        """Get roles based on tab and search query"""
+        roles = self.color_roles if self.current_tab == "color" else self.name_roles
+        
+        if self.search_query:
+            roles = [r for r in roles if self.search_query in r.name.lower()]
+            
+        return roles
+        
     def _build_view(self):
-        """Build view based on current tab"""
+        """Build view based on current tab and page"""
         self.clear_items()
         
-        # Tab buttons (row 0)
+        filtered_roles = self._get_filtered_roles()
+        total_pages = max(1, (len(filtered_roles) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
+        
+        # Ensure current page is valid
+        if self.current_page >= total_pages:
+            self.current_page = total_pages - 1
+        
+        start_idx = self.current_page * ITEMS_PER_PAGE
+        end_idx = start_idx + ITEMS_PER_PAGE
+        visible_roles = filtered_roles[start_idx:end_idx]
+        
+        # === ROW 0: Tabs & Inventory ===
         color_btn = discord.ui.Button(
             label="🎨 Colors",
             style=discord.ButtonStyle.primary if self.current_tab == "color" else discord.ButtonStyle.secondary,
@@ -130,7 +181,6 @@ class ShopView(discord.ui.View):
         name_btn.callback = self._switch_to_name
         self.add_item(name_btn)
         
-        # Inventory button (row 0)
         inv_btn = discord.ui.Button(
             label="🎒 Inventory",
             style=discord.ButtonStyle.secondary,
@@ -139,28 +189,58 @@ class ShopView(discord.ui.View):
         inv_btn.callback = self._open_inventory
         self.add_item(inv_btn)
         
-        # Role select based on tab (row 1)
-        if self.current_tab == "color":
-            select = RoleBuySelect(
-                self.cog,
-                self.color_roles,
-                self.owned_ids,
-                RoleType.COLOR,
-                len(self.owned_color)
-            )
-        else:
-            select = RoleBuySelect(
-                self.cog,
-                self.name_roles,
-                self.owned_ids,
-                RoleType.NAME,
-                len(self.owned_name)
-            )
+        # === ROW 1: Dropdown ===
+        # Pass visible_roles which corresponds to current page
+        owned_count = len(self.owned_color) if self.current_tab == "color" else len(self.owned_name)
+        role_type = RoleType.COLOR if self.current_tab == "color" else RoleType.NAME
+        
+        select = RoleBuySelect(
+            self.cog,
+            visible_roles,
+            self.owned_ids,
+            role_type,
+            owned_count,
+            len(filtered_roles)
+        )
         self.add_item(select)
         
-        # Refresh button (row 2)
+        # === ROW 2: Navigation & Search ===
+        
+        # Prev Button
+        prev_btn = discord.ui.Button(
+            label="⬅️",
+            style=discord.ButtonStyle.secondary,
+            disabled=self.current_page == 0,
+            row=2
+        )
+        prev_btn.callback = self._prev_page
+        self.add_item(prev_btn)
+        
+        # Page Indicator (Search Info)
+        search_status = "🔍 Search" if not self.search_query else "❌ Clear Search"
+        search_style = discord.ButtonStyle.secondary if not self.search_query else discord.ButtonStyle.danger
+        
+        search_btn = discord.ui.Button(
+            label=search_status,
+            style=search_style,
+            row=2
+        )
+        search_btn.callback = self._toggle_search
+        self.add_item(search_btn)
+        
+        # Next Button
+        next_btn = discord.ui.Button(
+            label="➡️",
+            style=discord.ButtonStyle.secondary,
+            disabled=self.current_page >= total_pages - 1,
+            row=2
+        )
+        next_btn.callback = self._next_page
+        self.add_item(next_btn)
+        
+        # Refresh Button
         refresh_btn = discord.ui.Button(
-            label="🔄 Refresh",
+            label="🔄",
             style=discord.ButtonStyle.secondary,
             row=2
         )
@@ -169,27 +249,42 @@ class ShopView(discord.ui.View):
     
     def build_embed(self) -> discord.Embed:
         """Build embed for current tab"""
+        filtered_roles = self._get_filtered_roles()
+        total_pages = max(1, (len(filtered_roles) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
+        
+        # Ensure current page is valid
+        if self.current_page >= total_pages:
+            self.current_page = total_pages - 1
+            
+        start_idx = self.current_page * ITEMS_PER_PAGE
+        end_idx = start_idx + ITEMS_PER_PAGE
+        visible_roles = filtered_roles[start_idx:end_idx]
+        
         if self.current_tab == "color":
             title = "🎨 Color Roles"
             current = self.owned_color[0].role.name if self.owned_color else "None"
-            description = f"**Current:** {current}\n*Buying a new color role replaces your current one.*"
-            roles = self.color_roles
-            max_roles = MAX_COLOR_ROLES
-            owned_count = len(self.owned_color)
+            description = f"**Current:** {current}\n*Buying a new color role replaces existing.*"
         else:
             title = "📛 Name Roles"
-            description = f"**Owned:** {len(self.owned_name)}/{MAX_NAME_ROLES}\n*You can have up to {MAX_NAME_ROLES} name roles.*"
-            roles = self.name_roles
-            max_roles = MAX_NAME_ROLES
-            owned_count = len(self.owned_name)
-        
+            description = f"**Owned:** {len(self.owned_name)}/{MAX_NAME_ROLES}\n*Max {MAX_NAME_ROLES} name roles.*"
+            
         embed = discord.Embed(title=title, color=discord.Color.gold())
-        embed.description = f"**Balance:** {format_balance(self.user_balance)} • **Tax:** {self.tax_rate:.0f}%\n\n{description}"
+        
+        # Add Search/Page status to description
+        status_line = f"**Balance:** {format_balance(self.user_balance)}"
+        
+        if self.search_query:
+            status_line += f"\n🔍 **Filter:** `{self.search_query}`"
+            
+        if total_pages > 1:
+            status_line += f"\n📄 **Page:** {self.current_page + 1}/{total_pages}"
+            
+        embed.description = f"{status_line}\n\n{description}"
         
         # List roles
-        if roles:
+        if visible_roles:
             role_list = ""
-            for role in roles[:15]:
+            for role in visible_roles:
                 if role.discord_id in self.owned_ids:
                     role_list += f"✅ ~~{role.name}~~ - Owned\n"
                 else:
@@ -198,7 +293,10 @@ class ShopView(discord.ui.View):
             
             embed.add_field(name="Available Roles", value=role_list, inline=False)
         else:
-            embed.add_field(name="Available Roles", value="*No roles in this category*", inline=False)
+            if self.search_query:
+                embed.add_field(name="No Results", value=f"No roles found for `{self.search_query}`", inline=False)
+            else:
+                embed.add_field(name="Available Roles", value="*No roles in this category*", inline=False)
         
         embed.set_footer(text="Select a role from dropdown to purchase")
         return embed
@@ -208,6 +306,7 @@ class ShopView(discord.ui.View):
             return await interaction.response.send_message("Not your shop!", ephemeral=True)
         
         self.current_tab = "color"
+        self.current_page = 0 # Reset page
         self._build_view()
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
     
@@ -216,8 +315,45 @@ class ShopView(discord.ui.View):
             return await interaction.response.send_message("Not your shop!", ephemeral=True)
         
         self.current_tab = "name"
+        self.current_page = 0 # Reset page
         self._build_view()
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
+        
+    async def _prev_page(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("Not your shop!", ephemeral=True)
+        
+        if self.current_page > 0:
+            self.current_page -= 1
+            self._build_view()
+            await interaction.response.edit_message(embed=self.build_embed(), view=self)
+            
+    async def _next_page(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("Not your shop!", ephemeral=True)
+        
+        # Max pages calc
+        filtered_roles = self._get_filtered_roles()
+        total_pages = max(1, (len(filtered_roles) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
+        
+        if self.current_page < total_pages - 1:
+            self.current_page += 1
+            self._build_view()
+            await interaction.response.edit_message(embed=self.build_embed(), view=self)
+            
+    async def _toggle_search(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("Not your shop!", ephemeral=True)
+            
+        if self.search_query:
+            # Clear search
+            self.search_query = ""
+            self.current_page = 0
+            self._build_view()
+            await interaction.response.edit_message(embed=self.build_embed(), view=self)
+        else:
+            # Open search modal
+            await interaction.response.send_modal(SearchRoleModal(self))
     
     async def _open_inventory(self, interaction: discord.Interaction):
         if interaction.user.id != self.user_id:
