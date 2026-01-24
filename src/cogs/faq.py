@@ -557,16 +557,9 @@ class FAQCog(commands.Cog):
         # Send new message FIRST to ensure delivery
         message = await target_channel.send(embed=embed, view=view)
         
-        # Delete old message if exists
-        if panel.get("message_id") and panel.get("channel_id"):
-            try:
-                old_channel = self.bot.get_channel(panel["channel_id"])
-                # Don't delete if we just updated the same message (shouldn't happen with send(), but good safety)
-                if old_channel and not (old_channel.id == target_channel.id and panel["message_id"] == message.id):
-                    old_message = await old_channel.fetch_message(panel["message_id"])
-                    await old_message.delete()
-            except:
-                pass
+        # Old message is kept to allow multiple instances (as per request)
+        # Note: Only the latest message ID is stored in DB for future 'edits', 
+        # but all interactive views remain functional.
         
         # Update panel with message info
         await db.update_faq_panel_message(
