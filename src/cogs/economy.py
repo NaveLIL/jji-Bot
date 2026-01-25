@@ -60,7 +60,7 @@ class EconomyCog(commands.Cog):
         sb_mins = (user.total_pb_time % 3600) // 60
         
         embed.add_field(name="📊 Rank", value=f"`{rank_text}`", inline=True)
-        embed.add_field(name="⏱️ SB Time", value=f"`{sb_hours}h {sb_mins}m`", inline=True)
+        embed.add_field(name="⏱️ SQB Time", value=f"`{sb_hours}h {sb_mins}m`", inline=True)
         embed.add_field(name="🎒 Roles", value=f"`{role_count}`", inline=True)
         
         embed.set_footer(text=get_standard_footer())

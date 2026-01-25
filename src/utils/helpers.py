@@ -142,8 +142,8 @@ def format_time(seconds: int) -> str:
     return f"{days}d {remaining_hours}h {remaining_minutes}m"
 
 
-def format_pb_time(seconds: int) -> str:
-    """Format SB (Squadron Battles) time with full labels"""
+def format_sqb_time(seconds: int) -> str:
+    """Format SQB (Squadron Battles) time with full labels"""
     if seconds == 0:
         return "0 hours"
     

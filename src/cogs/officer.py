@@ -9,7 +9,7 @@ from discord.ext import commands
 from src.services.database import db
 from src.services.economy_logger import economy_logger, EconomyAction
 from src.models.database import TransactionType
-from src.utils.helpers import format_balance, format_pb_time, load_config, calculate_tax, get_standard_footer
+from src.utils.helpers import format_balance, format_sqb_time, load_config, calculate_tax, get_standard_footer
 from src.utils.security import rate_limited, officer_only
 from src.utils.metrics import metrics
 from src.utils.logger import DiscordLogger
@@ -180,7 +180,7 @@ class OfficerCog(commands.Cog):
         else:
             embed.add_field(name="💰 Reward", value=f"```diff\n+ {format_balance(net_reward)}\n```", inline=False)
         
-        embed.set_footer(text=f"💎 Track their 10h SB for bonus • {get_standard_footer()}")
+        embed.set_footer(text=f"💎 Track their 10h SQB for bonus • {get_standard_footer()}")
         
         await interaction.response.send_message(embed=embed)
     
@@ -314,7 +314,7 @@ class OfficerCog(commands.Cog):
 ## 📋 YOUR RECRUITS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 *Showing last 10 recruits*
-💎 Bonus awarded at **{tracking_hours}h** SB time
+💎 Bonus awarded at **{tracking_hours}h** SQB time
 """
         
         for log in logs:
@@ -326,7 +326,7 @@ class OfficerCog(commands.Cog):
                 name = member.display_name if member else f"User {recruit.discord_id}"
                 
                 pb_time = recruit.total_pb_time
-                pb_display = format_pb_time(pb_time)
+                pb_display = format_sqb_time(pb_time)
                 
                 # Calculate progress
                 progress = min(100, (pb_time / required_seconds) * 100)

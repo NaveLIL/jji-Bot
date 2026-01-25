@@ -63,7 +63,7 @@ class AboutView(discord.ui.View):
                   "🎮 Casino Games\n"
                   "🛒 Role Marketplace\n"
                   "👮 Officer System\n"
-                  "📈 SB Time Tracking",
+                  "📈 SQB Time Tracking",
             inline=True
         )
         
@@ -100,7 +100,7 @@ class AboutView(discord.ui.View):
         
         embed.add_field(
             name="📋 Basic Commands",
-            value=">>> `/balance` — Check your wallet, rank, SB time\n"
+            value=">>> `/balance` — Check your wallet, rank, SQB time\n"
                   "`/pay @user [amount]` — Transfer money (taxed)\n"
                   "`/case` or `/daily` — Free daily case\n"
                   "`/stats` — Server economy overview",
@@ -357,7 +357,7 @@ class AboutView(discord.ui.View):
         embed.add_field(
             name="🎖️ Sergeant Bonus",
             value=f"**Master bonus:** ${master_bonus}/day\n"
-                  f"*Sergeants managing SB channel*\n"
+                  f"*Sergeants managing SQB channel*\n"
                   f"*Paid during salary distribution*",
             inline=True
         )
@@ -387,7 +387,7 @@ class AboutView(discord.ui.View):
         end_hour = prime_time.get("end_hour", 22)
         
         embed = discord.Embed(
-            title="📈 SB Time & Salaries",
+            title="📈 SQB Time & Salaries",
             description=(
                 "*Get paid for being in voice channels!*\n"
                 "─────────────────────────────────"
@@ -426,7 +426,7 @@ class AboutView(discord.ui.View):
         
         embed.add_field(
             name="📊 Track Your Time",
-            value=">>> `/profile` — See total SB time\n"
+            value=">>> `/profile` — See total SQB time\n"
                   "`/leaderboard pb_time` — Time rankings",
             inline=False
         )

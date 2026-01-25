@@ -8,7 +8,7 @@ from discord.ext import commands
 from typing import Literal
 
 from src.services.database import db
-from src.utils.helpers import format_balance, format_pb_time, get_rank_emoji, get_standard_footer
+from src.utils.helpers import format_balance, format_sqb_time, get_rank_emoji, get_standard_footer
 from src.utils.security import rate_limited
 
 
@@ -51,7 +51,7 @@ class LeaderboardView(discord.ui.View):
             color = 0xFEE75C  # Gold
             icon = "💵"
         else:
-            title = "⏱️ SB TIME LEADERBOARD"
+            title = "⏱️ SQB TIME LEADERBOARD"
             color = 0x5865F2  # Blurple
             icon = "🕐"
         
@@ -73,7 +73,7 @@ class LeaderboardView(discord.ui.View):
                 if self.order_by == "balance":
                     value = format_balance(user.balance)
                 else:
-                    value = format_pb_time(user.total_pb_time)
+                    value = format_sqb_time(user.total_pb_time)
                 
                 # Special formatting for top 3
                 if position <= 3:
@@ -173,8 +173,8 @@ class ProfileCog(commands.Cog):
         )
         
         embed.add_field(
-            name="⏱️ SB Time",
-            value=f"```\n{format_pb_time(db_user.total_pb_time)}\n```\n`Rank #{sb_rank if sb_rank else '?'}`",
+            name="⏱️ SQB Time",
+            value=f"```\n{format_sqb_time(db_user.total_pb_time)}\n```\n`Rank #{sb_rank if sb_rank else '?'}`",
             inline=True
         )
         
@@ -201,10 +201,10 @@ class ProfileCog(commands.Cog):
     async def leaderboard(
         self,
         interaction: discord.Interaction,
-        type: Literal["balance", "pb_time"] = "balance"
+        type: Literal["balance", "sqb_time"] = "balance"
     ):
         """Display leaderboard"""
-        view = LeaderboardView(order_by=type)
+        view = LeaderboardView(order_by=type if type == "balance" else "pb_time")
         view.bot = self.bot
         
         embed = await view.generate_embed(interaction.guild)
