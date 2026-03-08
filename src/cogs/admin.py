@@ -810,6 +810,13 @@ class SalaryModal(discord.ui.Modal, title="Set Salary Rates"):
             new_officer = float(self.officer.value)
             new_bonus = float(self.master_bonus.value)
 
+            if new_soldier < 0 or new_sergeant < 0 or new_officer < 0 or new_bonus < 0:
+                await interaction.response.send_message(
+                    "❌ Salary rates cannot be negative!",
+                    ephemeral=True
+                )
+                return
+
             config = load_config()
 
             # Calculate budget impact
@@ -1712,23 +1719,53 @@ class AdminCog(commands.Cog):
             )
             return
         
-        success, before, after = await db.set_user_balance(
+        # Calculate delta for budget-aware operation (closed-loop economy)
+        current_user = await db.get_or_create_user(user.id)
+        delta = amount - current_user.balance
+        
+        if delta == 0:
+            await interaction.response.send_message(
+                f"ℹ️ Balance is already **{format_balance(amount)}**",
+                ephemeral=True
+            )
+            return
+        
+        result = await db.admin_adjust_balance_atomic(
             user.id,
-            amount,
-            f"Set by {interaction.user.display_name}"
+            delta,
+            TransactionType.ADMIN_SET,
+            description=f"Balance set to {amount} by {interaction.user.display_name}"
         )
         
-        if success:
+        if not result["success"]:
+            error = result.get("error", "Unknown error")
             await interaction.response.send_message(
-                f"✅ Set **{user.display_name}**'s balance to **{format_balance(amount)}**\n"
-                f"Previous: {format_balance(before)}",
+                f"❌ Failed to set balance: {error}",
                 ephemeral=True
             )
-        else:
-            await interaction.response.send_message(
-                "❌ Failed to update balance!",
-                ephemeral=True
-            )
+            return
+        
+        # Log admin action
+        await economy_logger.log(
+            action=EconomyAction.ADMIN_ADD,
+            amount=delta,
+            user_id=user.id,
+            user_name=user.display_name,
+            before_balance=result["before_balance"],
+            after_balance=result["after_balance"],
+            before_budget=result["before_budget"],
+            after_budget=result["after_budget"],
+            description=f"Admin set balance by {interaction.user.display_name}",
+            details={"Admin": f"<@{interaction.user.id}>", "Target": format_balance(amount)},
+            source="Admin SetBalance"
+        )
+        
+        await interaction.response.send_message(
+            f"✅ Set **{user.display_name}**'s balance to **{format_balance(amount)}**\n"
+            f"Previous: {format_balance(result['before_balance'])}\n"
+            f"Budget impact: **{format_balance(abs(delta))}** {'from' if delta > 0 else 'to'} budget",
+            ephemeral=True
+        )
     
     @app_commands.command(name="addbalance", description="Add to a user's balance (Admin)")
     @app_commands.describe(
@@ -1863,30 +1900,27 @@ class AdminCog(commands.Cog):
         interaction: discord.Interaction,
         user: discord.Member
     ):
-        """Confiscate entire balance (atomic)"""
-        db_user = await db.get_or_create_user(user.id)
-        amount = db_user.balance
-        
-        if amount <= 0:
-            await interaction.response.send_message(
-                f"❌ User has no balance to confiscate!",
-                ephemeral=True
-            )
-            return
-        
-        result = await db.admin_adjust_balance_atomic(
+        """Confiscate entire balance (atomic, TOCTOU-safe)"""
+        result = await db.confiscate_all_atomic(
             user.id,
-            -amount,  # Take entire balance
-            TransactionType.CONFISCATE,
             description=f"Confiscated by {interaction.user.display_name}"
         )
         
         if not result["success"]:
-            await interaction.response.send_message(
-                f"❌ Failed to confiscate: {result.get('error', 'Unknown error')}",
-                ephemeral=True
-            )
+            error = result.get("error", "Unknown error")
+            if "no balance" in error.lower():
+                await interaction.response.send_message(
+                    f"❌ User has no balance to confiscate!",
+                    ephemeral=True
+                )
+            else:
+                await interaction.response.send_message(
+                    f"❌ Failed to confiscate: {error}",
+                    ephemeral=True
+                )
             return
+        
+        amount = result["amount"]
         
         # Log admin action
         await economy_logger.log(

@@ -625,17 +625,16 @@ class JJIBot(commands.Bot):
                 if user.balance > 0:
                     penalty = user.balance * (penalty_percent / 100)
                     
-                    await db.update_user_balance(
+                    result = await db.admin_adjust_balance_atomic(
                         after.id,
                         -penalty,
                         TransactionType.MUTE_PENALTY,
                         description=f"Mute penalty ({penalty_percent}%)"
                     )
                     
-                    await db.update_server_budget(penalty, add=True)
-                    
-                    self.logger.info(f"Mute penalty for {after}: {format_balance(penalty)}")
-                    metrics.track_transaction("mute_penalty")
+                    if result["success"]:
+                        self.logger.info(f"Mute penalty for {after}: {format_balance(penalty)}")
+                        metrics.track_transaction("mute_penalty")
     
     async def on_member_join(self, member: discord.Member):
         """Handle new member joining - add soldier value to budget"""
@@ -817,7 +816,7 @@ class JJIBot(commands.Bot):
                             # Check for timeout (timed_out_until) or voice mute
                             is_timed_out = member.timed_out_until is not None
                             voice_state = member.voice
-                            is_voice_muted = voice_state and (voice_state.mute or voice_state.self_mute)
+                            is_voice_muted = voice_state and voice_state.mute
                             
                             if is_timed_out or is_voice_muted:
                                 skipped_muted += 1

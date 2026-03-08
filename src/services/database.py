@@ -237,95 +237,95 @@ class DatabaseService:
                 # Sort IDs to ensure consistent locking order (Deadlock Prevention)
                 first_id, second_id = sorted([sender_id, recipient_id])
 
-            # Lock both users in consistent order
-            stmt = select(User).where(User.discord_id.in_([first_id, second_id])).order_by(User.discord_id).with_for_update()
-            result = await session.execute(stmt)
-            users = {u.discord_id: u for u in result.scalars().all()}
+                # Lock both users in consistent order
+                stmt = select(User).where(User.discord_id.in_([first_id, second_id])).order_by(User.discord_id).with_for_update()
+                result = await session.execute(stmt)
+                users = {u.discord_id: u for u in result.scalars().all()}
 
-            sender = users.get(sender_id)
-            recipient = users.get(recipient_id)
+                sender = users.get(sender_id)
+                recipient = users.get(recipient_id)
 
-            # Create if missing
-            if not sender:
-                sender = User(discord_id=sender_id)
-                session.add(sender)
+                # Create if missing
+                if not sender:
+                    sender = User(discord_id=sender_id)
+                    session.add(sender)
 
-            if not recipient:
-                recipient = User(discord_id=recipient_id)
-                session.add(recipient)
+                if not recipient:
+                    recipient = User(discord_id=recipient_id)
+                    session.add(recipient)
 
-            if not sender or not recipient:
-                await session.flush()
-                # If newly created, they are locked by insertion
+                if not sender or not recipient:
+                    await session.flush()
+                    # If newly created, they are locked by insertion
 
-            if sender.balance < amount:
-                return {"success": False, "error": "Insufficient funds"}
+                if sender.balance < amount:
+                    return {"success": False, "error": "Insufficient funds"}
 
-            # Get Economy for Tax
-            economy_res = await session.execute(
-                select(ServerEconomy).with_for_update()
-            )
-            economy = economy_res.scalar_one_or_none()
-            if not economy:
-                economy = ServerEconomy()
-                session.add(economy)
-                await session.flush()
+                # Get Economy for Tax
+                economy_res = await session.execute(
+                    select(ServerEconomy).with_for_update()
+                )
+                economy = economy_res.scalar_one_or_none()
+                if not economy:
+                    economy = ServerEconomy()
+                    session.add(economy)
+                    await session.flush()
 
-            # Calculate Tax
-            net_amount, tax_amount = calculate_tax(amount, economy.tax_rate)
+                # Calculate Tax
+                net_amount, tax_amount = calculate_tax(amount, economy.tax_rate)
 
-            # Update Sender
-            sender_before = sender.balance
-            sender.balance -= amount
-            sender_after = sender.balance
+                # Update Sender
+                sender_before = sender.balance
+                sender.balance -= amount
+                sender_after = sender.balance
 
-            tx_sender = Transaction(
-                user_id=sender.id,
-                amount=-amount,
-                transaction_type=TransactionType.TRANSFER_OUT,
-                tax_amount=tax_amount,
-                before_balance=sender_before,
-                after_balance=sender_after,
-                description=description or f"Transfer to {recipient_id}",
-                related_user_id=recipient.id
-            )
-            session.add(tx_sender)
+                tx_sender = Transaction(
+                    user_id=sender.id,
+                    amount=-amount,
+                    transaction_type=TransactionType.TRANSFER_OUT,
+                    tax_amount=tax_amount,
+                    before_balance=sender_before,
+                    after_balance=sender_after,
+                    description=description or f"Transfer to {recipient_id}",
+                    related_user_id=recipient.id
+                )
+                session.add(tx_sender)
 
-            # Update Recipient
-            recipient_before = recipient.balance
-            recipient.balance += net_amount
-            recipient_after = recipient.balance
+                # Update Recipient
+                recipient_before = recipient.balance
+                recipient.balance += net_amount
+                recipient_after = recipient.balance
 
-            tx_recipient = Transaction(
-                user_id=recipient.id,
-                amount=net_amount,
-                transaction_type=TransactionType.TRANSFER_IN,
-                tax_amount=0,
-                before_balance=recipient_before,
-                after_balance=recipient_after,
-                description=description or f"Transfer from {sender_id}",
-                related_user_id=sender.id
-            )
-            session.add(tx_recipient)
+                tx_recipient = Transaction(
+                    user_id=recipient.id,
+                    amount=net_amount,
+                    transaction_type=TransactionType.TRANSFER_IN,
+                    tax_amount=0,
+                    before_balance=recipient_before,
+                    after_balance=recipient_after,
+                    description=description or f"Transfer from {sender_id}",
+                    related_user_id=sender.id
+                )
+                session.add(tx_recipient)
 
-            # Update Economy (Tax)
-            if tax_amount > 0:
-                economy.total_taxes_collected += tax_amount
-                economy.total_budget += tax_amount
+                # Update Economy (Tax)
+                if tax_amount > 0:
+                    economy.total_taxes_collected += tax_amount
+                    economy.total_budget += tax_amount
 
-            await session.commit()
+                await session.commit()
 
-            return {
-                "success": True,
-                "sender_before": sender_before,
-                "sender_after": sender_after,
-                "recipient_before": recipient_before,
-                "recipient_after": recipient_after,
-                "net_amount": net_amount,
-                "tax": tax_amount,
-                "budget_before": economy.total_budget - tax_amount,
-                "budget_after": economy.total_budget
-            }
+                return {
+                    "success": True,
+                    "sender_before": sender_before,
+                    "sender_after": sender_after,
+                    "recipient_before": recipient_before,
+                    "recipient_after": recipient_after,
+                    "net_amount": net_amount,
+                    "tax": tax_amount,
+                    "budget_before": economy.total_budget - tax_amount,
+                    "budget_after": economy.total_budget
+                }
 
     async def update_user_roles(
         self, 
@@ -646,6 +646,60 @@ class DatabaseService:
                 "success": True,
                 "before_balance": before_balance,
                 "after_balance": user.balance,
+                "before_budget": before_budget,
+                "after_budget": economy.total_budget
+            }
+    
+    async def confiscate_all_atomic(
+        self,
+        discord_id: int,
+        description: str = None
+    ) -> dict:
+        """
+        Atomically confiscate a user's entire balance and return it to the budget.
+        Reads balance inside the lock to avoid TOCTOU races.
+        """
+        async with self.session() as session:
+            # Lock economy first
+            economy_result = await session.execute(
+                select(ServerEconomy).with_for_update()
+            )
+            economy = economy_result.scalar_one_or_none()
+            if not economy:
+                return {"success": False, "error": "Economy not initialized"}
+            
+            # Lock user
+            user_result = await session.execute(
+                select(User).where(User.discord_id == discord_id).with_for_update()
+            )
+            user = user_result.scalar_one_or_none()
+            if not user or user.balance <= 0:
+                return {"success": False, "error": "User has no balance to confiscate"}
+            
+            amount = user.balance
+            before_balance = user.balance
+            before_budget = economy.total_budget
+            
+            user.balance = 0
+            economy.total_budget += amount
+            
+            transaction = Transaction(
+                user_id=user.id,
+                amount=-amount,
+                transaction_type=TransactionType.CONFISCATE,
+                before_balance=before_balance,
+                after_balance=0,
+                description=description
+            )
+            session.add(transaction)
+            
+            await session.commit()
+            
+            return {
+                "success": True,
+                "amount": amount,
+                "before_balance": before_balance,
+                "after_balance": 0,
                 "before_budget": before_budget,
                 "after_budget": economy.total_budget
             }

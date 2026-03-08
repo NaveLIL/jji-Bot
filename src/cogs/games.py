@@ -291,38 +291,30 @@ class EnhancedBlackjackView(discord.ui.View):
         
         if net_result != 0:
             if net_result > 0:
-                # Player wins - calculate tax only on PROFIT, not on bet return
+                # Player wins - resolve atomically (budget + balance + tax in one transaction)
                 profit_amount = net_result  # This is just the profit (already accounts for split/double)
                 
-                economy = await db.get_server_economy()
-                net_profit, tax = calculate_tax(profit_amount, economy.tax_rate)
-                
-                # Total payout = total bet back + net profit after tax
-                # For split/double, total_bet includes all additional bets
-                total_payout = total_bet + net_profit
-                
-                # Deduct total payout from server budget
-                await db.update_server_budget(-total_payout)
-                
-                # Give player their winnings (no additional tax deduction)
-                await db.update_user_balance(
+                result = await db.resolve_game_win_atomic(
                     self.game.user_id,
-                    total_payout,
-                    TransactionType.GAME_WIN,
+                    total_bet,
+                    profit_amount,
+                    economy.tax_rate,
                     description="Blackjack win"
                 )
                 
+                if not result["success"]:
+                    return
+                
+                net_profit = result["net_profit"]
+                tax = result["tax"]
+                total_payout = result["total_payout"]
+                
                 if tax > 0:
-                    # Tax is already in budget (since we deducted net_payout from budget, implying we kept the tax)
-                    # So we only record the stat, do NOT add to budget again
-                    await db.add_taxes_collected(tax, add_to_budget=False)
                     metrics.track_tax(tax)
                 
                 metrics.track_game("blackjack", "win", total_bet)
                 
                 # Log game result
-                economy_after = await db.get_server_economy()
-                user_after = await db.get_or_create_user(self.game.user_id)
                 await economy_logger.log_game(
                     game_name="Blackjack",
                     user_id=self.game.user_id,
@@ -331,10 +323,10 @@ class EnhancedBlackjackView(discord.ui.View):
                     result="WIN",
                     winnings=total_payout,
                     profit=net_profit,
-                    user_before=user_before,
-                    user_after=user_after.balance,
-                    budget_before=budget_before,
-                    budget_after=economy_after.total_budget,
+                    user_before=result["before_balance"],
+                    user_after=result["after_balance"],
+                    budget_before=result["before_budget"],
+                    budget_after=result["after_budget"],
                     details={
                         "Initial Bet": f"${self.bet:,.2f}",
                         "Total Bet": f"${total_bet:,.2f}",
@@ -373,19 +365,21 @@ class EnhancedBlackjackView(discord.ui.View):
                     }
                 )
         else:
-            # Push - refund total bet from server budget (no tax on refund)
-            await db.update_server_budget(-total_bet)
-            await db.update_user_balance(
+            # Push - refund atomically (no profit, no tax)
+            result = await db.resolve_game_win_atomic(
                 self.game.user_id,
                 total_bet,
-                TransactionType.GAME_WIN,
+                0,  # No profit on push
+                0,  # No tax on refund
                 description="Blackjack push - refund"
             )
+            
+            if not result["success"]:
+                return
+            
             metrics.track_game("blackjack", "push", total_bet)
             
             # Log game result
-            economy_after = await db.get_server_economy()
-            user_after = await db.get_or_create_user(self.game.user_id)
             await economy_logger.log_game(
                 game_name="Blackjack",
                 user_id=self.game.user_id,
@@ -394,10 +388,10 @@ class EnhancedBlackjackView(discord.ui.View):
                 result="PUSH",
                 winnings=total_bet,
                 profit=0,
-                user_before=user_before,
-                user_after=user_after.balance,
-                budget_before=budget_before,
-                budget_after=economy_after.total_budget,
+                user_before=result["before_balance"],
+                user_after=result["after_balance"],
+                budget_before=result["before_budget"],
+                budget_after=result["after_budget"],
                 details={
                     "Initial Bet": f"${self.bet:,.2f}",
                     "Total Bet": f"${total_bet:,.2f}",
@@ -458,18 +452,16 @@ class DoubleButton(discord.ui.Button):
             await interaction.response.send_message("❌ This isn't your game!", ephemeral=True)
             return
         
-        user = await db.get_or_create_user(view.game.user_id)
         double_cost = view.game.current_hand.bet
         
-        if user.balance < double_cost:
+        result = await db.place_bet_atomic(view.game.user_id, double_cost, description="Blackjack double down")
+        if not result["success"]:
             await interaction.response.send_message(
                 f"❌ Insufficient balance! Need **{format_balance(double_cost)}** to double.",
                 ephemeral=True
             )
             return
         
-        await db.update_user_balance(view.game.user_id, -double_cost, TransactionType.GAME_LOSS, description="Blackjack double down")
-        await db.update_server_budget(double_cost)  # Add to server budget
         view.game.double_down()
         await view.update_game(interaction)
 
@@ -484,18 +476,16 @@ class SplitButton(discord.ui.Button):
             await interaction.response.send_message("❌ This isn't your game!", ephemeral=True)
             return
         
-        user = await db.get_or_create_user(view.game.user_id)
         split_cost = view.game.current_hand.bet
         
-        if user.balance < split_cost:
+        result = await db.place_bet_atomic(view.game.user_id, split_cost, description="Blackjack split")
+        if not result["success"]:
             await interaction.response.send_message(
                 f"❌ Insufficient balance! Need **{format_balance(split_cost)}** to split.",
                 ephemeral=True
             )
             return
         
-        await db.update_user_balance(view.game.user_id, -split_cost, TransactionType.GAME_LOSS, description="Blackjack split")
-        await db.update_server_budget(split_cost)  # Add to server budget
         view.game.split()
         await view.update_game(interaction)
 
@@ -512,8 +502,14 @@ class SurrenderButton(discord.ui.Button):
         
         view.game.surrender()
         refund = view.bet / 2
-        await db.update_server_budget(-refund)  # Deduct refund from server budget
-        await db.update_user_balance(view.game.user_id, refund, TransactionType.GAME_WIN, description="Blackjack surrender refund")
+        # Refund half the bet atomically
+        await db.resolve_game_win_atomic(
+            view.game.user_id,
+            refund,  # Return half the bet
+            0,  # No profit
+            0,  # No tax on refund
+            description="Blackjack surrender refund"
+        )
         await view.update_game(interaction)
 
 
@@ -527,18 +523,16 @@ class InsuranceYesButton(discord.ui.Button):
             await interaction.response.send_message("❌ This isn't your game!", ephemeral=True)
             return
         
-        user = await db.get_or_create_user(view.game.user_id)
         insurance_cost = view.bet / 2
         
-        if user.balance < insurance_cost:
+        result = await db.place_bet_atomic(view.game.user_id, insurance_cost, description="Blackjack insurance")
+        if not result["success"]:
             await interaction.response.send_message(
                 f"❌ Insufficient balance! Need **{format_balance(insurance_cost)}** for insurance.",
                 ephemeral=True
             )
             return
         
-        await db.update_user_balance(view.game.user_id, -insurance_cost, TransactionType.GAME_LOSS, description="Blackjack insurance")
-        await db.update_server_budget(insurance_cost)  # Add to server budget
         view.game.take_insurance(True)
         await view.update_game(interaction)
 
@@ -567,16 +561,13 @@ class PlayAgainButton(discord.ui.Button):
             await interaction.response.send_message("❌ This isn't your game!", ephemeral=True)
             return
         
-        user = await db.get_or_create_user(view.game.user_id)
-        if user.balance < self.last_bet:
+        result = await db.place_bet_atomic(interaction.user.id, self.last_bet, description="Blackjack bet")
+        if not result["success"]:
             await interaction.response.send_message(
                 f"❌ Insufficient balance! Need **{format_balance(self.last_bet)}** to play.",
                 ephemeral=True
             )
             return
-        
-        await db.update_user_balance(interaction.user.id, -self.last_bet, TransactionType.GAME_LOSS, description="Blackjack bet")
-        await db.update_server_budget(self.last_bet)  # Add to server budget
         
         config = load_config()
         game_config = config.get("games", {}).get("blackjack", {})
@@ -614,16 +605,13 @@ class DoubleOrNothingButton(discord.ui.Button):
             await interaction.response.send_message("❌ This isn't your game!", ephemeral=True)
             return
         
-        user = await db.get_or_create_user(view.game.user_id)
-        if user.balance < self.double_bet:
+        result = await db.place_bet_atomic(interaction.user.id, self.double_bet, description="Blackjack bet (double or nothing)")
+        if not result["success"]:
             await interaction.response.send_message(
                 f"❌ Insufficient balance! Need **{format_balance(self.double_bet)}** to double or nothing.",
                 ephemeral=True
             )
             return
-        
-        await db.update_user_balance(interaction.user.id, -self.double_bet, TransactionType.GAME_LOSS, description="Blackjack bet (double or nothing)")
-        await db.update_server_budget(self.double_bet)  # Add to server budget
         
         config = load_config()
         game_config = config.get("games", {}).get("blackjack", {})
@@ -919,14 +907,10 @@ class GamesCog(commands.Cog):
             await interaction.response.send_message(f"❌ {error}", ephemeral=True)
             return
         
-        success, _, _ = await db.update_user_balance(interaction.user.id, -bet, TransactionType.GAME_LOSS, description="Blackjack bet")
-        
-        if not success:
+        result = await db.place_bet_atomic(interaction.user.id, bet, description="Blackjack bet")
+        if not result["success"]:
             await interaction.response.send_message("❌ Failed to place bet. Please try again.", ephemeral=True)
             return
-        
-        # Bet goes to server budget (closed-loop economy)
-        await db.update_server_budget(bet)
         
         game_config = self.config.get("games", {}).get("blackjack", {})
         game = create_blackjack_game(
