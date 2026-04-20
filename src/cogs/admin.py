@@ -2128,6 +2128,115 @@ class AdminCog(commands.Cog):
         
         await interaction.response.send_message(embed=embed)
     
+    # ==================== SB CONFIG ====================
+    
+    @app_commands.command(
+        name="sb_config",
+        description="Configure Squadron Battles settings (Admin)"
+    )
+    @app_commands.describe(
+        master_channel="Voice channel that triggers SB creation",
+        ping_channel="Text channel for recruitment pings",
+        soldier_role="Role to ping for recruitment",
+        prime_start="Prime Time start hour (UTC, 0-23)",
+        prime_end="Prime Time end hour (UTC, 0-23)",
+        max_squad="Max squad size (default 8)",
+    )
+    @admin_only()
+    async def sb_config(
+        self,
+        interaction: discord.Interaction,
+        master_channel: discord.VoiceChannel = None,
+        ping_channel: discord.TextChannel = None,
+        soldier_role: discord.Role = None,
+        prime_start: app_commands.Range[int, 0, 23] = None,
+        prime_end: app_commands.Range[int, 0, 23] = None,
+        max_squad: app_commands.Range[int, 4, 16] = None,
+    ):
+        """Configure Squadron Battles — show current settings or update them."""
+        config = load_config()
+        changed = False
+
+        if master_channel is not None:
+            config.setdefault("channels", {})["master_voice"] = master_channel.id
+            changed = True
+        if ping_channel is not None:
+            config.setdefault("channels", {})["ping_sergeant"] = ping_channel.id
+            changed = True
+        if soldier_role is not None:
+            config.setdefault("roles", {})["soldier"] = soldier_role.id
+            changed = True
+        if prime_start is not None:
+            config.setdefault("prime_time", {})["start_hour"] = prime_start
+            changed = True
+        if prime_end is not None:
+            config.setdefault("prime_time", {})["end_hour"] = prime_end
+            changed = True
+        if max_squad is not None:
+            config.setdefault("sb", {})["max_squad"] = max_squad
+            changed = True
+
+        if changed:
+            save_config(config)
+            # Update bot's in-memory config
+            self.bot.config = config
+
+        # Build display embed
+        ch_cfg = config.get("channels", {})
+        roles_cfg = config.get("roles", {})
+        pt_cfg = config.get("prime_time", {})
+        sb_cfg = config.get("sb", {})
+
+        mc_id = ch_cfg.get("master_voice")
+        pc_id = ch_cfg.get("ping_sergeant")
+        sr_id = roles_cfg.get("soldier")
+        pt_start = pt_cfg.get("start_hour", 14)
+        pt_end = pt_cfg.get("end_hour", 22)
+        ms = sb_cfg.get("max_squad", 8)
+
+        embed = discord.Embed(
+            title="⚔️ Squadron Battles — Configuration",
+            color=0xFF6600,
+        )
+        embed.add_field(
+            name="🔊 Master Channel",
+            value=f"<#{mc_id}>" if mc_id else "❌ Not set",
+            inline=True,
+        )
+        embed.add_field(
+            name="📢 Ping Channel",
+            value=f"<#{pc_id}>" if pc_id else "❌ Not set",
+            inline=True,
+        )
+        embed.add_field(
+            name="⚔️ Soldier Role",
+            value=f"<@&{sr_id}>" if sr_id else "❌ Not set",
+            inline=True,
+        )
+        embed.add_field(
+            name="🕐 Prime Time",
+            value=f"`{pt_start:02d}:00 — {pt_end:02d}:00 UTC`",
+            inline=True,
+        )
+        embed.add_field(
+            name="👥 Max Squad",
+            value=f"`{ms}`",
+            inline=True,
+        )
+        embed.add_field(
+            name="🔧 Developer",
+            value=f"<@{config.get('developer_id')}>" if config.get("developer_id") else "Not set",
+            inline=True,
+        )
+
+        if changed:
+            embed.description = "✅ **Settings updated!**"
+        else:
+            embed.description = "Current SB configuration. Pass options to change."
+
+        embed.set_footer(text=get_standard_footer())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     @app_commands.command(name="sync_commands", description="Sync bot commands (Admin)")
     @admin_only()
     async def sync_commands(self, interaction: discord.Interaction):

@@ -27,6 +27,272 @@ from src.models.database import TransactionType, ServerEconomy, User, Transactio
 from src.utils.helpers import load_config, save_config, is_prime_time, format_balance, get_standard_footer
 from src.utils.logger import setup_logging, DiscordLogger
 from src.utils.metrics import metrics
+import logging
+
+_bot_logger = logging.getLogger("jji.sb")
+
+# ═══════════════════════════════════════════════
+#  DM Ping Cooldown (seconds)
+# ═══════════════════════════════════════════════
+DM_PING_COOLDOWN = 300   # 5 minutes between DM pings per squad
+DM_SEND_DELAY = 0.35     # delay between each DM to avoid rate limits
+
+
+# ═══════════════════════════════════════════════
+#  SB Assembly View — persistent panel with DM Ping button
+# ═══════════════════════════════════════════════
+
+class SBAssemblyView(discord.ui.View):
+    """Persistent view attached to SB assembly messages with DM Ping button."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="DM Ping",
+        style=discord.ButtonStyle.primary,
+        emoji="📨",
+        custom_id="sb:dm_ping",
+    )
+    async def dm_ping_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Open modal for DM ping message."""
+        bot: JJIBot = interaction.client  # type: ignore
+        config = bot.config
+
+        # Only commander (sergeant/officer/admin who created) can use
+        sergeant_role_id = config.get("roles", {}).get("sergeant")
+        officer_role_id = config.get("roles", {}).get("officer")
+        admin_role_id = config.get("roles", {}).get("admin")
+        developer_id = config.get("developer_id")
+        member_role_ids = [r.id for r in interaction.user.roles]
+
+        is_authorized = (
+            interaction.user.id == developer_id
+            or (sergeant_role_id and sergeant_role_id in member_role_ids)
+            or (officer_role_id and officer_role_id in member_role_ids)
+            or (admin_role_id and admin_role_id in member_role_ids)
+        )
+        if not is_authorized:
+            embed = discord.Embed(
+                title="❌ Access Denied",
+                description="Only **Sergeants**, **Officers**, and **Admins** can send DM pings.",
+                color=0xFF3333,
+            )
+            embed.set_footer(text=get_standard_footer())
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        # Check cooldown via Redis
+        on_cd, ttl = await cache.check_cooldown(interaction.user.id, "sb_dm_ping")
+        if on_cd:
+            embed = discord.Embed(
+                title="⏳ Cooldown",
+                description=f"You can send next DM ping in **{ttl}s**.",
+                color=0xFFAA00,
+            )
+            embed.set_footer(text=get_standard_footer())
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        # Extract squad number from the embed title
+        squad_num = "?"
+        if interaction.message and interaction.message.embeds:
+            title = interaction.message.embeds[0].title or ""
+            # "📢 SQUADRON ASSEMBLY!" or "📢 SOLDIERS NEEDED!" — look at description
+            desc = interaction.message.embeds[0].description or ""
+            # "**Squadron #3** is forming up!"
+            import re
+            m = re.search(r"Squadron #(\d+)", desc)
+            if m:
+                squad_num = m.group(1)
+
+        # Show modal
+        modal = SBDmPingModal(squad_num=squad_num)
+        await interaction.response.send_modal(modal)
+
+
+class SBDmPingModal(discord.ui.Modal, title="📨 DM Ping — Message"):
+    """Modal for entering custom DM ping message."""
+
+    message = discord.ui.TextInput(
+        label="Message to soldiers",
+        style=discord.TextStyle.paragraph,
+        placeholder="Join Squadron Battles now! We need you!",
+        default="We're forming up for Squadron Battles — join us for salary and fun!",
+        max_length=1500,
+        required=True,
+    )
+
+    def __init__(self, squad_num: str = "?"):
+        super().__init__()
+        self.squad_num = squad_num
+
+    async def on_submit(self, interaction: discord.Interaction):
+        bot: JJIBot = interaction.client  # type: ignore
+        config = bot.config
+        guild = interaction.guild
+        if not guild:
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        soldier_role_id = config.get("roles", {}).get("soldier")
+        if not soldier_role_id:
+            embed = discord.Embed(
+                title="❌ No Soldier Role",
+                description="Soldier role is not configured. Use `/sb_config` to set it up.",
+                color=0xFF3333,
+            )
+            embed.set_footer(text=get_standard_footer())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        soldier_role = guild.get_role(soldier_role_id)
+        if not soldier_role:
+            embed = discord.Embed(
+                title="❌ Role Not Found",
+                description="Soldier role not found on this server.",
+                color=0xFF3333,
+            )
+            embed.set_footer(text=get_standard_footer())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        # Collect targets: soldiers NOT already in SB voice channels
+        sb_voice_members = set()
+        for ch in guild.voice_channels:
+            if ch.name.startswith("SB #") or ch.name.startswith("Squadron Battle #"):
+                for m in ch.members:
+                    sb_voice_members.add(m.id)
+
+        targets = [
+            m for m in soldier_role.members
+            if not m.bot and m.id not in sb_voice_members and m.id != interaction.user.id
+        ]
+
+        if not targets:
+            embed = discord.Embed(
+                title="📭 No Targets",
+                description="All soldiers are already in Squadron Battle channels or offline with DMs closed.",
+                color=0xFFAA00,
+            )
+            embed.set_footer(text=get_standard_footer())
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        # Preview
+        custom_text = self.message.value
+        preview = discord.Embed(
+            title="📨 DM Ping Preview",
+            description=f"Will send to **{len(targets)}** soldier(s).\n\n"
+                        f"**Message:**\n>>> {custom_text[:500]}",
+            color=0x3498DB,
+        )
+        preview.set_footer(text=get_standard_footer())
+
+        confirm_view = SBDmPingConfirmView(
+            targets=targets,
+            custom_text=custom_text,
+            squad_num=self.squad_num,
+            sender=interaction.user,
+        )
+        await interaction.followup.send(embed=preview, view=confirm_view, ephemeral=True)
+
+
+class SBDmPingConfirmView(discord.ui.View):
+    """Confirm / Cancel DM ping delivery."""
+
+    def __init__(self, targets: list, custom_text: str, squad_num: str, sender):
+        super().__init__(timeout=120)
+        self.targets = targets
+        self.custom_text = custom_text
+        self.squad_num = squad_num
+        self.sender = sender
+
+    @discord.ui.button(label="Send", style=discord.ButtonStyle.success, emoji="✅")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.sender.id:
+            await interaction.response.send_message("Only the sender can confirm.", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+
+        # Set cooldown
+        await cache.set_cooldown(interaction.user.id, "sb_dm_ping", DM_PING_COOLDOWN)
+
+        # Disable buttons
+        for child in self.children:
+            child.disabled = True  # type: ignore
+        progress_embed = discord.Embed(
+            title="📨 Sending DMs…",
+            description=f"0 / {len(self.targets)}",
+            color=0x3498DB,
+        )
+        progress_embed.set_footer(text=get_standard_footer())
+        await interaction.edit_original_response(embed=progress_embed, view=self)
+
+        guild = interaction.guild
+        delivered = 0
+        failed = 0
+
+        dm_embed = discord.Embed(
+            title=f"📢 Squadron #{self.squad_num} — Join Now!",
+            description=self.custom_text,
+            color=0xFF6600,
+        )
+        dm_embed.add_field(
+            name="💰 Salary",
+            value="You earn money while playing in SB!",
+            inline=True,
+        )
+        dm_embed.add_field(
+            name="🏠 Server",
+            value=guild.name if guild else "JJI",
+            inline=True,
+        )
+        dm_embed.set_footer(text=get_standard_footer())
+
+        for i, target in enumerate(self.targets, 1):
+            try:
+                await target.send(embed=dm_embed)
+                delivered += 1
+            except Exception:
+                failed += 1
+
+            if i % 5 == 0:
+                try:
+                    progress_embed.description = f"{i} / {len(self.targets)}"
+                    await interaction.edit_original_response(embed=progress_embed)
+                except Exception:
+                    pass
+
+            await asyncio.sleep(DM_SEND_DELAY)
+
+        # Final report
+        report = discord.Embed(
+            title="📨 DM Ping Complete",
+            description=f"✅ Delivered: **{delivered}**\n❌ Failed: **{failed}**",
+            color=0x2ECC71 if failed == 0 else 0xFFAA00,
+        )
+        report.set_footer(text=get_standard_footer())
+        await interaction.edit_original_response(embed=report, view=None)
+        _bot_logger.info(f"DM ping SB #{self.squad_num}: {delivered} delivered, {failed} failed (by {self.sender})")
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.sender.id:
+            await interaction.response.send_message("Only the sender can cancel.", ephemeral=True)
+            return
+
+        for child in self.children:
+            child.disabled = True  # type: ignore
+        cancel_embed = discord.Embed(
+            title="❌ DM Ping Cancelled",
+            description="No messages were sent.",
+            color=0x95A5A6,
+        )
+        cancel_embed.set_footer(text=get_standard_footer())
+        await interaction.response.edit_message(embed=cancel_embed, view=self)
 
 
 # Load environment
@@ -66,6 +332,9 @@ class JJIBot(commands.Bot):
     async def setup_hook(self):
         """Setup hook called before bot starts"""
         self.logger.info("Starting JJI Bot...")
+        
+        # Register persistent views (survive bot restarts)
+        self.add_view(SBAssemblyView())
         
         # Initialize database
         await db.init_db()
@@ -314,15 +583,17 @@ class JJIBot(commands.Bot):
     async def _handle_master_channel_join(self, member: discord.Member, master_channel: discord.VoiceChannel):
         """Handle when someone joins master channel - create paired SB channels (Ground + Air) for sergeants"""
         config = self.config
+        developer_id = config.get("developer_id")
+        is_developer = member.id == developer_id
         
-        # Check prime time
+        # Check prime time (developer bypasses)
         prime_time = config.get("prime_time", {})
         is_prime = is_prime_time(
             prime_time.get("start_hour", 14),
             prime_time.get("end_hour", 22)
         )
         
-        if not is_prime:
+        if not is_prime and not is_developer:
             # Not prime time - deny channel creation
             try:
                 embed = discord.Embed(
@@ -347,15 +618,15 @@ class JJIBot(commands.Bot):
                 self.logger.error(f"Failed to send prime time notification to {member}: {e}")
             return
         
-        # Check if user has sergeant role (from Discord, not just DB flag)
+        # Check if user has sergeant role (developer bypasses)
         sergeant_role_id = config.get("roles", {}).get("sergeant")
         officer_role_id = config.get("roles", {}).get("officer")
         admin_role_id = config.get("roles", {}).get("admin")
         
         member_role_ids = [r.id for r in member.roles]
         
-        # Sergeants, officers, and admins can create SB channels
-        is_authorized = (
+        # Sergeants, officers, admins, and developer can create SB channels
+        is_authorized = is_developer or (
             (sergeant_role_id and sergeant_role_id in member_role_ids) or
             (officer_role_id and officer_role_id in member_role_ids) or
             (admin_role_id and admin_role_id in member_role_ids)
@@ -413,6 +684,17 @@ class JJIBot(commands.Bot):
                 await ground_channel.edit(category=master_channel.category, position=base_position)
                 await air_channel.edit(category=master_channel.category, position=base_position + 1)
             
+            # Developer test mode: make channels private (nobody else can join)
+            if is_developer:
+                overwrites = {
+                    guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=False),
+                    member: discord.PermissionOverwrite(connect=True, view_channel=True),
+                    guild.me: discord.PermissionOverwrite(connect=True, view_channel=True),
+                }
+                await ground_channel.edit(overwrites=overwrites)
+                await air_channel.edit(overwrites=overwrites)
+                self.logger.info(f"Developer {member} — SB #{next_num} channels set to private")
+            
             # Sergeant daily bonus - CLAIM BEFORE moving user
             claimed = await db.claim_master_bonus(member.id)
             if claimed:
@@ -460,7 +742,7 @@ class JJIBot(commands.Bot):
                         ground_count = len(ground_channel.members)
                         air_count = len(air_channel.members)
                         total_count = ground_count + air_count
-                        max_squad = 8  # Max squad size (total for both channels)
+                        max_squad = config.get("sb", {}).get("max_squad", 8)
                         needed = max(0, max_squad - total_count)
                         
                         embed = discord.Embed(
@@ -494,7 +776,11 @@ class JJIBot(commands.Bot):
                         soldier_role_id = config.get("roles", {}).get("soldier")
                         ping_content = f"<@&{soldier_role_id}>" if soldier_role_id else ""
                         
-                        await channel.send(content=ping_content, embed=embed)
+                        await channel.send(
+                            content=ping_content,
+                            embed=embed,
+                            view=SBAssemblyView(),
+                        )
                         
                         # Register channels in tracker
                         self.sb_channels[ground_channel.id] = {
@@ -1019,7 +1305,7 @@ class JJIBot(commands.Bot):
                 return
             
             soldier_role_id = config.get("roles", {}).get("soldier")
-            max_squad = 8
+            max_squad = config.get("sb", {}).get("max_squad", 8)
             now = datetime.now(timezone.utc)
             
             # Find all active SB channels (new format: "SB #N Ground/Air")
@@ -1133,7 +1419,11 @@ class JJIBot(commands.Bot):
                         embed.set_footer(text="Join Ground for tanks or Air for aviation! • Squadron System")
                         
                         ping_content = f"<@&{soldier_role_id}>" if soldier_role_id else ""
-                        await ping_channel.send(content=ping_content, embed=embed)
+                        await ping_channel.send(
+                            content=ping_content,
+                            embed=embed,
+                            view=SBAssemblyView(),
+                        )
                         
                         tracking["last_ping"] = now
                         tracking["last_status"] = "recruiting"
@@ -1173,7 +1463,7 @@ class JJIBot(commands.Bot):
                         embed.set_footer(text="Stay alert for openings! • Squadron System")
                         
                         # No ping for standby, just info message
-                        await ping_channel.send(embed=embed)
+                        await ping_channel.send(embed=embed, view=SBAssemblyView())
                         
                         tracking["last_ping"] = now
                         tracking["last_status"] = "full"
