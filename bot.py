@@ -34,7 +34,7 @@ _bot_logger = logging.getLogger("jji.sb")
 # ═══════════════════════════════════════════════
 #  DM Ping Cooldown (seconds)
 # ═══════════════════════════════════════════════
-DM_PING_COOLDOWN = 300   # 5 minutes between DM pings per squad
+DM_PING_COOLDOWN = 900   # 15 minutes between DM pings per user
 DM_SEND_DELAY = 0.35     # delay between each DM to avoid rate limits
 
 
@@ -59,9 +59,8 @@ class SBAssemblyView(discord.ui.View):
         bot: JJIBot = interaction.client  # type: ignore
         config = bot.config
 
-        # Only commander (sergeant/officer/admin who created) can use
+        # Only sergeant/admin/developer can use (officers excluded)
         sergeant_role_id = config.get("roles", {}).get("sergeant")
-        officer_role_id = config.get("roles", {}).get("officer")
         admin_role_id = config.get("roles", {}).get("admin")
         developer_id = config.get("developer_id")
         member_role_ids = [r.id for r in interaction.user.roles]
@@ -69,13 +68,12 @@ class SBAssemblyView(discord.ui.View):
         is_authorized = (
             interaction.user.id == developer_id
             or (sergeant_role_id and sergeant_role_id in member_role_ids)
-            or (officer_role_id and officer_role_id in member_role_ids)
             or (admin_role_id and admin_role_id in member_role_ids)
         )
         if not is_authorized:
             embed = discord.Embed(
                 title="❌ Access Denied",
-                description="Only **Sergeants**, **Officers**, and **Admins** can send DM pings.",
+                description="Only **Sergeants** and **Admins** can send DM pings.",
                 color=0xFF3333,
             )
             embed.set_footer(text=get_standard_footer())
@@ -782,12 +780,22 @@ class JJIBot(commands.Bot):
                             view=SBAssemblyView(),
                         )
                         
-                        # Register in tracker (ground id only — monitor tracks by ground)
+                        # Register both channels in tracker
                         self.sb_channels[ground_channel.id] = {
                             "last_ping": datetime.now(timezone.utc),
                             "commander_id": member.id,
                             "last_status": "initial",
                             "squad_num": next_num,
+                            "type": "ground",
+                            "paired_id": air_channel.id
+                        }
+                        self.sb_channels[air_channel.id] = {
+                            "last_ping": datetime.now(timezone.utc),
+                            "commander_id": member.id,
+                            "last_status": "initial",
+                            "squad_num": next_num,
+                            "type": "air",
+                            "paired_id": ground_channel.id
                         }
                 except Exception as e:
                     self.logger.error(f"Failed to send SB ping: {e}")
