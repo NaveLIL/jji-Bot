@@ -684,16 +684,16 @@ class JJIBot(commands.Bot):
                 await ground_channel.edit(category=master_channel.category, position=base_position)
                 await air_channel.edit(category=master_channel.category, position=base_position + 1)
             
-            # Developer test mode: make channels private (nobody else can join)
+            # Developer test mode: make channels unjoinable but visible (so mentions resolve)
             if is_developer:
                 overwrites = {
-                    guild.default_role: discord.PermissionOverwrite(connect=False, view_channel=False),
-                    member: discord.PermissionOverwrite(connect=True, view_channel=True),
-                    guild.me: discord.PermissionOverwrite(connect=True, view_channel=True),
+                    guild.default_role: discord.PermissionOverwrite(connect=False),
+                    member: discord.PermissionOverwrite(connect=True),
+                    guild.me: discord.PermissionOverwrite(connect=True),
                 }
                 await ground_channel.edit(overwrites=overwrites)
                 await air_channel.edit(overwrites=overwrites)
-                self.logger.info(f"Developer {member} — SB #{next_num} channels set to private")
+                self.logger.info(f"Developer {member} — SB #{next_num} channels set to private (connect=False)")
             
             # Sergeant daily bonus - CLAIM BEFORE moving user
             claimed = await db.claim_master_bonus(member.id)
@@ -782,22 +782,12 @@ class JJIBot(commands.Bot):
                             view=SBAssemblyView(),
                         )
                         
-                        # Register channels in tracker
+                        # Register in tracker (ground id only — monitor tracks by ground)
                         self.sb_channels[ground_channel.id] = {
                             "last_ping": datetime.now(timezone.utc),
                             "commander_id": member.id,
                             "last_status": "initial",
                             "squad_num": next_num,
-                            "type": "ground",
-                            "paired_id": air_channel.id
-                        }
-                        self.sb_channels[air_channel.id] = {
-                            "last_ping": datetime.now(timezone.utc),
-                            "commander_id": member.id,
-                            "last_status": "initial",
-                            "squad_num": next_num,
-                            "type": "air",
-                            "paired_id": ground_channel.id
                         }
                 except Exception as e:
                     self.logger.error(f"Failed to send SB ping: {e}")
