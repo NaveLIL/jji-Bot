@@ -540,10 +540,15 @@ class DatabaseService:
             before_balance = user.balance
             before_budget = economy.total_budget
             
-            # Update balances atomically
+            # Update balances atomically.
+            # Accounting model: budget pays the user (net_amount).
+            # Tax never leaves the budget — it is implicitly retained.
+            # We track total_rewards_paid by NET (what actually left the budget),
+            # so that the bookkeeping invariant holds:
+            #   delta(budget) == taxes_collected_delta - rewards_paid_delta + bets_in_delta
             user.balance += net_amount
             economy.total_budget -= net_amount  # Only net goes out, tax stays
-            economy.total_rewards_paid += gross_amount
+            economy.total_rewards_paid += net_amount
             
             if tax_amount > 0:
                 economy.total_taxes_collected += tax_amount
@@ -715,7 +720,16 @@ class DatabaseService:
         Returns dict with success status and balance details.
         """
         async with self.session() as session:
-            # Lock user first
+            # Lock economy first (consistent global order: Economy -> User)
+            economy_result = await session.execute(
+                select(ServerEconomy).with_for_update()
+            )
+            economy = economy_result.scalar_one_or_none()
+            
+            if not economy:
+                return {"success": False, "error": "Economy not initialized"}
+            
+            # Lock user
             user_result = await session.execute(
                 select(User).where(User.discord_id == discord_id).with_for_update()
             )
@@ -726,15 +740,6 @@ class DatabaseService:
             
             if user.balance < bet_amount:
                 return {"success": False, "error": "Insufficient funds"}
-            
-            # Lock economy
-            economy_result = await session.execute(
-                select(ServerEconomy).with_for_update()
-            )
-            economy = economy_result.scalar_one_or_none()
-            
-            if not economy:
-                return {"success": False, "error": "Economy not initialized"}
             
             before_balance = user.balance
             before_budget = economy.total_budget
@@ -779,6 +784,15 @@ class DatabaseService:
         Returns dict with success status and details.
         """
         async with self.session() as session:
+            # Lock economy first (consistent global order: Economy -> User)
+            economy_result = await session.execute(
+                select(ServerEconomy).with_for_update()
+            )
+            economy = economy_result.scalar_one_or_none()
+            
+            if not economy:
+                return {"success": False, "error": "Economy not initialized"}
+            
             # Lock user
             user_result = await session.execute(
                 select(User).where(User.discord_id == discord_id).with_for_update()
@@ -787,15 +801,6 @@ class DatabaseService:
             
             if not user:
                 return {"success": False, "error": "User not found"}
-            
-            # Lock economy
-            economy_result = await session.execute(
-                select(ServerEconomy).with_for_update()
-            )
-            economy = economy_result.scalar_one_or_none()
-            
-            if not economy:
-                return {"success": False, "error": "Economy not initialized"}
             
             # Calculate tax on profit only
             tax_amount = profit_amount * (tax_rate / 100)
@@ -809,10 +814,13 @@ class DatabaseService:
             if economy.total_budget < total_payout:
                 return {"success": False, "error": "Insufficient server budget"}
             
-            # Atomically update
+            # Atomically update.
+            # Bookkeeping: bet_amount returned to user is reimbursement of
+            # money already inside the budget (placed earlier as a bet),
+            # NOT a fresh reward. Only net_profit counts toward rewards_paid.
             user.balance += total_payout
             economy.total_budget -= total_payout
-            economy.total_rewards_paid += total_payout
+            economy.total_rewards_paid += net_profit  # only the new money out
             
             if tax_amount > 0:
                 economy.total_taxes_collected += tax_amount
@@ -956,7 +964,13 @@ class DatabaseService:
     async def purchase_role(self, discord_id: int, role_discord_id: int) -> Tuple[bool, str]:
         """Purchase a role for a user. Returns (success, message)"""
         async with self.session() as session:
-            # Get user
+            # Lock economy first (consistent global order: Economy -> User)
+            economy_result = await session.execute(
+                select(ServerEconomy).with_for_update()
+            )
+            economy = economy_result.scalar_one_or_none()
+            
+            # Get user (locked)
             user_result = await session.execute(
                 select(User).where(User.discord_id == discord_id).with_for_update()
             )
@@ -999,10 +1013,6 @@ class DatabaseService:
             session.add(user_role)
             
             # Add money to server budget (closed-loop economy)
-            economy_result = await session.execute(
-                select(ServerEconomy).with_for_update()
-            )
-            economy = economy_result.scalar_one_or_none()
             if economy:
                 economy.total_budget += role.price
             
@@ -1033,6 +1043,12 @@ class DatabaseService:
         Tax goes to budget, role price also goes to budget.
         """
         async with self.session() as session:
+            # Lock economy first (consistent global order: Economy -> User)
+            economy_result = await session.execute(
+                select(ServerEconomy).with_for_update()
+            )
+            economy = economy_result.scalar_one_or_none()
+
             # Get user with lock
             user_result = await session.execute(
                 select(User).where(User.discord_id == discord_id).with_for_update()
@@ -1072,12 +1088,6 @@ class DatabaseService:
             if user.balance < total_cost:
                 return False, f"Insufficient balance. Need ${total_cost:.2f}", 0
             
-            # Lock economy
-            economy_result = await session.execute(
-                select(ServerEconomy).with_for_update()
-            )
-            economy = economy_result.scalar_one_or_none()
-            
             # Process purchase atomically
             before_balance = user.balance
             user.balance -= total_cost
@@ -1113,6 +1123,12 @@ class DatabaseService:
     ) -> Tuple[bool, str, float]:
         """Sell a role. Returns (success, message, refund_amount)"""
         async with self.session() as session:
+            # Lock economy first (consistent global order: Economy -> User)
+            economy_result = await session.execute(
+                select(ServerEconomy).with_for_update()
+            )
+            economy = economy_result.scalar_one_or_none()
+
             user_result = await session.execute(
                 select(User).where(User.discord_id == discord_id).with_for_update()
             )
@@ -1141,12 +1157,8 @@ class DatabaseService:
                 return False, "You don't own this role", 0
             
             refund = role.price * (refund_percentage / 100)
-            
+
             # Check if server has enough budget for refund
-            economy_result = await session.execute(
-                select(ServerEconomy).with_for_update()
-            )
-            economy = economy_result.scalar_one_or_none()
             if economy and economy.total_budget < refund:
                 return False, "Server budget too low for refund", 0
             
@@ -1257,15 +1269,117 @@ class DatabaseService:
             case_use = CaseUse(user_id=user.id)
             session.add(case_use)
             await session.commit()
+
+    async def claim_case_atomic(
+        self,
+        discord_id: int,
+        cooldown_hours: int,
+        gross_amount: float,
+        net_amount: float,
+        tax_amount: float,
+        description: str = "Case reward",
+    ) -> dict:
+        """
+        Atomically: verify cooldown, record CaseUse, pay reward from budget.
+
+        Prevents double-claim races (two simultaneous /case calls both
+        passing the cooldown check) and ensures CaseUse is never written
+        without the corresponding payout (or vice versa) — both happen
+        in the same transaction.
+
+        Returns dict with success and balance/budget snapshots.
+        """
+        async with self._acquire_locks([discord_id]):
+            async with self.session() as session:
+                # Lock economy first (consistent global lock order: Economy -> User)
+                economy_result = await session.execute(
+                    select(ServerEconomy).with_for_update()
+                )
+                economy = economy_result.scalar_one_or_none()
+                if not economy:
+                    return {"success": False, "error": "Economy not initialized"}
+
+                # Lock user (or create)
+                user_result = await session.execute(
+                    select(User).where(User.discord_id == discord_id).with_for_update()
+                )
+                user = user_result.scalar_one_or_none()
+                if not user:
+                    user = User(discord_id=discord_id)
+                    session.add(user)
+                    await session.flush()
+
+                # Re-check cooldown under lock (TOCTOU-safe)
+                last_use_result = await session.execute(
+                    select(CaseUse)
+                    .where(CaseUse.user_id == user.id)
+                    .order_by(CaseUse.last_used.desc())
+                    .limit(1)
+                )
+                last_use = last_use_result.scalar_one_or_none()
+                if last_use is not None:
+                    next_available = last_use.last_used + timedelta(hours=cooldown_hours)
+                    if datetime.utcnow() < next_available:
+                        return {
+                            "success": False,
+                            "error": "On cooldown",
+                            "next_available": next_available,
+                        }
+
+                # Budget check
+                if economy.total_budget < net_amount:
+                    return {"success": False, "error": "Insufficient server budget"}
+
+                before_balance = user.balance
+                before_budget = economy.total_budget
+
+                # Record case use FIRST (so cooldown locks in regardless of payout result downstream)
+                session.add(CaseUse(user_id=user.id))
+
+                # Pay
+                user.balance += net_amount
+                economy.total_budget -= net_amount  # tax stays in budget
+                economy.total_rewards_paid += net_amount
+                if tax_amount > 0:
+                    economy.total_taxes_collected += tax_amount
+
+                session.add(Transaction(
+                    user_id=user.id,
+                    amount=net_amount,
+                    transaction_type=TransactionType.CASE_REWARD,
+                    tax_amount=tax_amount,
+                    before_balance=before_balance,
+                    after_balance=user.balance,
+                    description=description,
+                ))
+
+                await session.commit()
+
+                return {
+                    "success": True,
+                    "before_balance": before_balance,
+                    "after_balance": user.balance,
+                    "before_budget": before_budget,
+                    "after_budget": economy.total_budget,
+                    "net_amount": net_amount,
+                    "tax": tax_amount,
+                }
     
     # ==================== OFFICER SYSTEM ====================
     
     async def log_officer_accept(
         self, 
         officer_discord_id: int, 
-        recruit_discord_id: int
+        recruit_discord_id: int,
+        squad: str = "main",
     ) -> OfficerLog:
-        """Log an officer accepting a recruit"""
+        """Log an officer accepting a recruit.
+
+        Args:
+            squad: 'main' for Main Squad, 'training' for Training Squad.
+        """
+        if squad not in ("main", "training"):
+            squad = "main"
         async with self.session() as session:
             officer = await self.get_or_create_user(officer_discord_id)
             recruit = await self.get_or_create_user(recruit_discord_id)
@@ -1274,7 +1388,8 @@ class DatabaseService:
                 officer_id=officer.id,
                 recruit_id=recruit.id,
                 recruit_discord_id=recruit_discord_id,
-                pb_time_at_accept=recruit.total_pb_time
+                pb_time_at_accept=recruit.total_pb_time,
+                squad=squad,
             )
             session.add(log)
             await session.commit()
@@ -1282,38 +1397,55 @@ class DatabaseService:
             return log
     
     async def get_officer_stats(self, discord_id: int) -> dict:
-        """Get officer recruitment statistics"""
+        """Get officer recruitment statistics (overall + per-squad breakdown)."""
         async with self.session() as session:
             user = await self.get_or_create_user(discord_id)
             
-            # Total recruits
+            # Total recruits (overall + per squad)
             total_result = await session.execute(
-                select(func.count(OfficerLog.id)).where(OfficerLog.officer_id == user.id)
+                select(OfficerLog.squad, func.count(OfficerLog.id))
+                .where(OfficerLog.officer_id == user.id)
+                .group_by(OfficerLog.squad)
             )
-            total_recruits = total_result.scalar() or 0
+            squad_totals = {row[0] or "main": row[1] for row in total_result.all()}
+            total_recruits = sum(squad_totals.values())
             
-            # Pending 10h rewards
+            # Pending 10h rewards (overall + per squad)
             pending_result = await session.execute(
-                select(func.count(OfficerLog.id)).where(
+                select(OfficerLog.squad, func.count(OfficerLog.id)).where(
                     OfficerLog.officer_id == user.id,
                     OfficerLog.pb_10h_rewarded == False
-                )
+                ).group_by(OfficerLog.squad)
             )
-            pending_rewards = pending_result.scalar() or 0
+            squad_pending = {row[0] or "main": row[1] for row in pending_result.all()}
+            pending_rewards = sum(squad_pending.values())
             
-            # Claimed 10h rewards
+            # Claimed 10h rewards (overall + per squad)
             claimed_result = await session.execute(
-                select(func.count(OfficerLog.id)).where(
+                select(OfficerLog.squad, func.count(OfficerLog.id)).where(
                     OfficerLog.officer_id == user.id,
                     OfficerLog.pb_10h_rewarded == True
-                )
+                ).group_by(OfficerLog.squad)
             )
-            claimed_rewards = claimed_result.scalar() or 0
+            squad_claimed = {row[0] or "main": row[1] for row in claimed_result.all()}
+            claimed_rewards = sum(squad_claimed.values())
             
             return {
                 "total_recruits": total_recruits,
                 "pending_rewards": pending_rewards,
-                "claimed_rewards": claimed_rewards
+                "claimed_rewards": claimed_rewards,
+                "by_squad": {
+                    "main": {
+                        "total": squad_totals.get("main", 0),
+                        "pending": squad_pending.get("main", 0),
+                        "claimed": squad_claimed.get("main", 0),
+                    },
+                    "training": {
+                        "total": squad_totals.get("training", 0),
+                        "pending": squad_pending.get("training", 0),
+                        "claimed": squad_claimed.get("training", 0),
+                    },
+                },
             }
     
     async def get_pending_10h_bonuses(self) -> List[Tuple[OfficerLog, User]]:
@@ -1949,26 +2081,39 @@ class DatabaseService:
         channel_id: int, 
         is_master: bool = False
     ) -> VoiceSession:
-        """Start a voice session"""
-        async with self.session() as session:
-            user = await self.get_or_create_user(discord_id)
-            
-            # End any existing active sessions
-            await session.execute(
-                update(VoiceSession)
-                .where(VoiceSession.user_id == user.id, VoiceSession.is_active == True)
-                .values(is_active=False, left_at=datetime.utcnow())
-            )
-            
-            voice_session = VoiceSession(
-                user_id=user.id,
-                channel_id=channel_id,
-                is_in_master=is_master
-            )
-            session.add(voice_session)
-            await session.commit()
-            await session.refresh(voice_session)
-            return voice_session
+        """Start a voice session.
+
+        Race-safe: serialised per-user via in-process lock and protected by
+        a partial unique index ``uq_voice_session_active_user`` at the DB
+        level (see migration ``add_unique_active_voice_session``).
+        """
+        async with self._acquire_locks([discord_id]):
+            async with self.session() as session:
+                user = await self.get_or_create_user(discord_id)
+
+                # Close any existing active sessions in the same transaction
+                # so the partial unique index never sees a duplicate.
+                await session.execute(
+                    update(VoiceSession)
+                    .where(
+                        VoiceSession.user_id == user.id,
+                        VoiceSession.is_active == True,
+                    )
+                    .values(is_active=False, left_at=datetime.utcnow())
+                )
+                # Flush the close so the unique partial index slot is freed
+                # before we insert the new active row.
+                await session.flush()
+
+                voice_session = VoiceSession(
+                    user_id=user.id,
+                    channel_id=channel_id,
+                    is_in_master=is_master,
+                )
+                session.add(voice_session)
+                await session.commit()
+                await session.refresh(voice_session)
+                return voice_session
     
     async def end_voice_session(self, discord_id: int) -> Optional[int]:
         """End a voice session. Returns duration in seconds."""
@@ -2096,7 +2241,12 @@ class DatabaseService:
             }
 
     async def claim_master_bonus(self, discord_id: int) -> bool:
-        """Claim daily master channel bonus. Returns True if claimed."""
+        """Claim daily master channel bonus. Returns True if claimed.
+
+        DEPRECATED for paid claims — use claim_master_bonus_atomic so that
+        the claim flag and the budget payout happen in the same transaction.
+        Kept for backward compatibility with non-paying call sites.
+        """
         async with self.session() as session:
             user = await self.get_or_create_user(discord_id)
             
@@ -2130,6 +2280,103 @@ class DatabaseService:
                 return True
             
             return False
+
+    async def claim_master_bonus_atomic(
+        self,
+        discord_id: int,
+        bonus_amount: float,
+        description: str = "Daily Squadron Battle host bonus",
+    ) -> dict:
+        """Atomically: verify not-yet-claimed-today, set flag, pay bonus.
+
+        Either both happen or neither — the flag will not be set if the
+        payout cannot be funded, preventing a permanently lost bonus.
+
+        Returns:
+            {"success": True,  "before_balance", "after_balance",
+             "before_budget", "after_budget", "amount"}
+            {"success": False, "error": "already_claimed" | "no_active_master_session"
+                                          | "insufficient_budget" | "economy_not_initialized"}
+        """
+        async with self._acquire_locks([discord_id]):
+            async with self.session() as session:
+                # Lock economy first (Economy -> User ordering)
+                economy_result = await session.execute(
+                    select(ServerEconomy).with_for_update()
+                )
+                economy = economy_result.scalar_one_or_none()
+                if not economy:
+                    return {"success": False, "error": "economy_not_initialized"}
+
+                # Lock user
+                user_result = await session.execute(
+                    select(User).where(User.discord_id == discord_id).with_for_update()
+                )
+                user = user_result.scalar_one_or_none()
+                if not user:
+                    user = User(discord_id=discord_id)
+                    session.add(user)
+                    await session.flush()
+
+                today = datetime.utcnow().date()
+
+                # Already-claimed-today check
+                already = await session.execute(
+                    select(VoiceSession).where(
+                        VoiceSession.user_id == user.id,
+                        VoiceSession.is_in_master == True,
+                        VoiceSession.master_bonus_claimed == True,
+                        func.date(VoiceSession.joined_at) == today,
+                    )
+                )
+                if already.scalar_one_or_none():
+                    return {"success": False, "error": "already_claimed"}
+
+                # Find current master session
+                cur = await session.execute(
+                    select(VoiceSession).where(
+                        VoiceSession.user_id == user.id,
+                        VoiceSession.is_active == True,
+                        VoiceSession.is_in_master == True,
+                    )
+                )
+                voice_session = cur.scalar_one_or_none()
+                if not voice_session:
+                    return {"success": False, "error": "no_active_master_session"}
+
+                # Budget check (bonus is tax-free, so net == gross)
+                if economy.total_budget < bonus_amount:
+                    return {"success": False, "error": "insufficient_budget"}
+
+                before_balance = user.balance
+                before_budget = economy.total_budget
+
+                # Apply both: flag + payout in same commit
+                voice_session.master_bonus_claimed = True
+                user.balance += bonus_amount
+                economy.total_budget -= bonus_amount
+                economy.total_rewards_paid += bonus_amount
+
+                session.add(Transaction(
+                    user_id=user.id,
+                    amount=bonus_amount,
+                    transaction_type=TransactionType.MASTER_BONUS,
+                    tax_amount=0,
+                    before_balance=before_balance,
+                    after_balance=user.balance,
+                    description=description,
+                ))
+
+                await session.commit()
+
+                return {
+                    "success": True,
+                    "before_balance": before_balance,
+                    "after_balance": user.balance,
+                    "before_budget": before_budget,
+                    "after_budget": economy.total_budget,
+                    "amount": bonus_amount,
+                }
     
     # ==================== CHANNEL CONFIG ====================
     

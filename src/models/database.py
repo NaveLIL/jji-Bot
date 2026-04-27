@@ -14,6 +14,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
+from sqlalchemy import text
 
 
 class Base(DeclarativeBase):
@@ -247,6 +248,7 @@ class OfficerLog(Base):
     pb_time_at_accept: Mapped[int] = mapped_column(Integer, default=0, nullable=False)  # seconds
     pb_10h_rewarded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     pb_10h_rewarded_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    squad: Mapped[str] = mapped_column(String(16), default="main", server_default="main", nullable=False)
     
     # Relationships
     officer: Mapped["User"] = relationship("User", back_populates="officer_logs", foreign_keys=[officer_id])
@@ -359,6 +361,15 @@ class VoiceSession(Base):
     __table_args__ = (
         CheckConstraint('duration_seconds >= 0', name='check_duration_non_negative'),
         Index('idx_voice_session_active', 'user_id', 'is_active'),
+        # Partial unique index: at most one active session per user.
+        # Prevents races where duplicate Discord voice events create two rows.
+        Index(
+            'uq_voice_session_active_user',
+            'user_id',
+            unique=True,
+            sqlite_where=text('is_active = 1'),
+            postgresql_where=text('is_active = true'),
+        ),
     )
     
     def __repr__(self) -> str:

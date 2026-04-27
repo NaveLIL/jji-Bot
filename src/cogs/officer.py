@@ -24,10 +24,22 @@ class OfficerCog(commands.Cog):
         self.discord_logger = DiscordLogger(bot)
     
     @app_commands.command(name="accept", description="Accept a new recruit (Officer only)")
-    @app_commands.describe(recruit="The new member to accept")
+    @app_commands.describe(
+        recruit="The new member to accept",
+        squad="Which squad to assign the recruit to"
+    )
+    @app_commands.choices(squad=[
+        app_commands.Choice(name="Main Squad", value="main"),
+        app_commands.Choice(name="Training Squad", value="training"),
+    ])
     @rate_limited("officer", limit=10, window=60)
     @officer_only()
-    async def accept(self, interaction: discord.Interaction, recruit: discord.Member):
+    async def accept(
+        self,
+        interaction: discord.Interaction,
+        recruit: discord.Member,
+        squad: app_commands.Choice[str],
+    ):
         """Accept a new recruit"""
         if recruit.bot:
             await interaction.response.send_message(
@@ -43,23 +55,40 @@ class OfficerCog(commands.Cog):
             )
             return
         
-        # Check if recruit already has soldier role
+        # Resolve squad selection -> role
         config = self.config
-        soldier_role_id = config.get("roles", {}).get("soldier")
-        
-        if soldier_role_id:
-            soldier_role = interaction.guild.get_role(soldier_role_id)
-            if soldier_role and soldier_role in recruit.roles:
-                await interaction.response.send_message(
-                    "❌ This member is already a soldier!",
-                    ephemeral=True
-                )
-                return
-        
+        squad_value = squad.value
+        squad_label = "Main Squad" if squad_value == "main" else "Training Squad"
+        role_key = "soldier" if squad_value == "main" else "soldier_ts"
+        target_role_id = config.get("roles", {}).get(role_key)
+
+        if not target_role_id:
+            await interaction.response.send_message(
+                f"❌ {squad_label} role is not configured!",
+                ephemeral=True
+            )
+            return
+
+        target_role = interaction.guild.get_role(target_role_id)
+        if not target_role:
+            await interaction.response.send_message(
+                f"❌ {squad_label} role not found on this server!",
+                ephemeral=True
+            )
+            return
+
+        # Check if recruit already has the target squad role
+        if target_role in recruit.roles:
+            await interaction.response.send_message(
+                f"❌ This member is already in the {squad_label}!",
+                ephemeral=True
+            )
+            return
+
         # Get officer reward amount
         officer_config = config.get("officer_system", {})
         accept_reward = officer_config.get("accept_reward", 20)
-        
+
         # Check server budget
         economy = await db.get_server_economy()
         if economy.total_budget < accept_reward:
@@ -68,27 +97,24 @@ class OfficerCog(commands.Cog):
                 ephemeral=True
             )
             return
-        
-        # Give soldier role and remove guest role
-        if soldier_role_id:
-            soldier_role = interaction.guild.get_role(soldier_role_id)
-            if soldier_role:
-                try:
-                    await recruit.add_roles(soldier_role, reason=f"Accepted by {interaction.user.display_name}")
-                except discord.Forbidden:
-                    await interaction.response.send_message(
-                        "❌ I don't have permission to assign the soldier role!",
-                        ephemeral=True
-                    )
-                    return
-        
+
+        # Give squad role
+        try:
+            await recruit.add_roles(target_role, reason=f"Accepted by {interaction.user.display_name} ({squad_label})")
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                f"❌ I don't have permission to assign the {squad_label} role!",
+                ephemeral=True
+            )
+            return
+
         # Remove guest role if exists
         guest_role_id = config.get("roles", {}).get("guest")
         if guest_role_id:
             guest_role = interaction.guild.get_role(guest_role_id)
             if guest_role and guest_role in recruit.roles:
                 try:
-                    await recruit.remove_roles(guest_role, reason=f"Promoted to soldier by {interaction.user.display_name}")
+                    await recruit.remove_roles(guest_role, reason=f"Promoted by {interaction.user.display_name} ({squad_label})")
                 except discord.Forbidden:
                     pass  # Non-critical, continue anyway
         
@@ -96,7 +122,7 @@ class OfficerCog(commands.Cog):
         await db.update_user_roles(recruit.id, is_soldier=True)
         
         # Log the recruitment
-        await db.log_officer_accept(interaction.user.id, recruit.id)
+        await db.log_officer_accept(interaction.user.id, recruit.id, squad=squad_value)
         
         # Calculate tax on officer reward
         economy = await db.get_server_economy()
@@ -113,7 +139,7 @@ class OfficerCog(commands.Cog):
             net_amount=net_reward,
             tax_amount=tax,
             transaction_type=TransactionType.OFFICER_REWARD,
-            description=f"Recruitment reward for {recruit.display_name}"
+            description=f"Recruitment reward for {recruit.display_name} ({squad_label})"
         )
         
         if not result["success"]:
@@ -135,9 +161,10 @@ class OfficerCog(commands.Cog):
             after_balance=officer_after.balance,
             before_budget=budget_before,
             after_budget=economy_after.total_budget,
-            description=f"Recruitment reward for accepting {recruit.display_name}",
+            description=f"Recruitment reward for accepting {recruit.display_name} ({squad_label})",
             details={
                 "Recruit": f"<@{recruit.id}>",
+                "Squad": squad_label,
                 "Gross Reward": f"${accept_reward:,.2f}",
                 "Tax": f"${tax:,.2f}",
                 "Net Reward": f"${net_reward:,.2f}"
@@ -162,13 +189,19 @@ class OfficerCog(commands.Cog):
         
         embed = discord.Embed(color=0x00FF00)
         
-        embed.description = """
+        squad_flavor = (
+            "*A new soldier has joined our ranks!*"
+            if squad_value == "main"
+            else "*A new trainee has joined the Training Squad!*"
+        )
+        embed.description = f"""
 ## 🎖️ RECRUIT ACCEPTED
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
-*A new soldier has joined our ranks!*
+{squad_flavor}
 """
         embed.add_field(name="👮 Officer", value=interaction.user.mention, inline=True)
         embed.add_field(name="⚔️ Recruit", value=recruit.mention, inline=True)
+        embed.add_field(name="🛡️ Squad", value=squad_label, inline=True)
         
         # Show reward with tax info
         if tax > 0:
@@ -256,6 +289,30 @@ class OfficerCog(commands.Cog):
             value=f"```\n{stats['claimed_rewards']}\n```",
             inline=True
         )
+
+        # Per-squad breakdown
+        by_squad = stats.get("by_squad", {})
+        main_s = by_squad.get("main", {"total": 0, "pending": 0, "claimed": 0})
+        train_s = by_squad.get("training", {"total": 0, "pending": 0, "claimed": 0})
+        embed.add_field(
+            name="🛡️ Main Squad",
+            value=(
+                f"Recruits: `{main_s['total']}`\n"
+                f"Pending: `{main_s['pending']}`\n"
+                f"Claimed: `{main_s['claimed']}`"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="🎓 Training Squad",
+            value=(
+                f"Recruits: `{train_s['total']}`\n"
+                f"Pending: `{train_s['pending']}`\n"
+                f"Claimed: `{train_s['claimed']}`"
+            ),
+            inline=True,
+        )
+        embed.add_field(name="\u200b", value="\u200b", inline=True)
         
         # Calculate lifetime earnings
         accept_earnings = stats["total_recruits"] * accept_reward
@@ -338,8 +395,9 @@ class OfficerCog(commands.Cog):
                 else:
                     status = f"⏳ {progress:.1f}% ({pb_display})"
                 
+                squad_label = "🛡️ Main" if (log.squad or "main") == "main" else "🎓 Training"
                 embed.add_field(
-                    name=f"⚔️ {name}",
+                    name=f"⚔️ {name} · {squad_label}",
                     value=f"{status}\n<t:{int(log.accepted_at.timestamp())}:R>",
                     inline=True
                 )

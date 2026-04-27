@@ -209,8 +209,23 @@ class EconomyCog(commands.Cog):
         """Open a random case with chance for money"""
         config = self.config.get("case", {})
         cooldown_hours = config.get("cooldown_hours", 24)
-        
-        # Check cooldown
+
+        # Acknowledge the interaction synchronously with the opening
+        # animation embed so we never miss the 3s ack window even on
+        # slow database calls below.
+        opening_embed = discord.Embed(
+            description=(
+                "## 📦 Opening Case...\n\n"
+                "🎁 **???** 🎁\n\n"
+                "*Rolling for reward...*"
+            ),
+            color=0xFEE75C
+        )
+        opening_embed.set_author(name=f"📦 {interaction.user.display_name}'s Case", icon_url=interaction.user.display_avatar.url)
+        await interaction.response.send_message(embed=opening_embed)
+
+        # Check cooldown (informational; the real authoritative check is
+        # done atomically inside claim_case_atomic before payout)
         can_use, next_time = await db.can_use_case(
             interaction.user.id,
             cooldown_hours
@@ -230,23 +245,8 @@ class EconomyCog(commands.Cog):
                 color=0x5865F2
             )
             embed.set_author(name="📦 Daily Case", icon_url=interaction.user.display_avatar.url)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.edit_original_response(embed=embed)
             return
-        
-        # Record usage BEFORE rolling
-        await db.record_case_use(interaction.user.id)
-        
-        # Show opening animation
-        opening_embed = discord.Embed(
-            description=(
-                "## 📦 Opening Case...\n\n"
-                "🎁 **???** 🎁\n\n"
-                "*Rolling for reward...*"
-            ),
-            color=0xFEE75C
-        )
-        opening_embed.set_author(name=f"📦 {interaction.user.display_name}'s Case", icon_url=interaction.user.display_avatar.url)
-        await interaction.response.send_message(embed=opening_embed)
         
         # Small delay for suspense
         await asyncio.sleep(1.5)
@@ -256,7 +256,8 @@ class EconomyCog(commands.Cog):
         roll = random.uniform(0, 100)
         
         if roll < empty_chance:
-            # Empty case
+            # Empty case — still consumes the daily try.
+            await db.record_case_use(interaction.user.id)
             result_embed = discord.Embed(color=0x99AAB5)
             result_embed.description = (
                 "## 📦 Empty Case\n\n"
@@ -293,21 +294,26 @@ class EconomyCog(commands.Cog):
         economy = await db.get_server_economy()
         net_reward, tax = calculate_tax(reward, economy.tax_rate)
         
-        # Pay reward atomically from budget
-        result = await db.pay_from_budget_atomic(
+        # Atomically: re-verify cooldown, record CaseUse, pay reward.
+        # This eliminates the TOCTOU window between can_use_case() and the payout.
+        result = await db.claim_case_atomic(
             discord_id=interaction.user.id,
+            cooldown_hours=cooldown_hours,
             gross_amount=reward,
             net_amount=net_reward,
             tax_amount=tax,
-            transaction_type=TransactionType.CASE_REWARD,
-            description="Case reward"
+            description="Case reward",
         )
         
         if not result["success"]:
+            err = result.get("error", "Server budget depleted")
+            # If the race lost (parallel /case won the cooldown), surface a friendly msg
+            if err == "On cooldown":
+                err = "You already opened a case — please wait for the cooldown."
             error_embed = discord.Embed(
                 description=(
                     "## ❌ Reward Failed\n\n"
-                    f"> {result.get('error', 'Server budget depleted')}\n"
+                    f"> {err}\n"
                     "> Please try again later."
                 ),
                 color=0xED4245

@@ -421,6 +421,44 @@ class JJIBot(commands.Bot):
 
         # Sync roles
         await self.sync_roles()
+
+        # Sweep stale (empty) Squadron Battle voice channels left over from
+        # a previous bot session. Without this the channels linger forever
+        # because deletion only happens on voice_state_update.
+        await self._sweep_stale_sb_channels()
+
+    async def _sweep_stale_sb_channels(self) -> None:
+        """Delete empty SB voice channels left behind by a previous run."""
+        config = self.config
+        guild_id = config.get("guild_id")
+        if not guild_id:
+            return
+        guild = self.get_guild(guild_id)
+        if not guild:
+            return
+
+        deleted = 0
+        for ch in list(guild.voice_channels):
+            name = ch.name
+            if not (name.startswith("SB #") or name.startswith("Squadron Battle #")):
+                continue
+            if len(ch.members) > 0:
+                continue
+            try:
+                await ch.delete(reason="Startup sweep: stale empty SB channel")
+                deleted += 1
+                # Drop any stale tracking
+                self.sb_channels.pop(ch.id, None)
+                await cache.delete_sb_last_ping(ch.id)
+            except discord.NotFound:
+                pass
+            except discord.Forbidden:
+                self.logger.warning(f"Missing permissions to delete stale SB channel {name}")
+            except Exception as e:
+                self.logger.error(f"Failed to delete stale SB channel {name}: {e}")
+
+        if deleted:
+            self.logger.info(f"Startup sweep: deleted {deleted} stale SB channel(s)")
     
     async def sync_roles(self):
         """Sync user roles from Discord to Database on startup"""
@@ -558,11 +596,11 @@ class JJIBot(commands.Bot):
                         pass  # Already deleted
                     self.logger.info(f"Deleted empty SB #{sb_num} channels (Ground + Air)")
                     
-                    # Clean up tracker
-                    if ground_channel.id in self.sb_channels:
-                        del self.sb_channels[ground_channel.id]
-                    if air_channel.id in self.sb_channels:
-                        del self.sb_channels[air_channel.id]
+                    # Clean up tracker (race-safe)
+                    self.sb_channels.pop(ground_channel.id, None)
+                    self.sb_channels.pop(air_channel.id, None)
+                    await cache.delete_sb_last_ping(ground_channel.id)
+                    await cache.delete_sb_last_ping(air_channel.id)
             elif old_format_channel and len(old_format_channel.members) == 0:
                 # Old format single channel
                 try:
@@ -570,8 +608,8 @@ class JJIBot(commands.Bot):
                 except discord.NotFound:
                     pass  # Already deleted
                 self.logger.info(f"Deleted empty SB channel: {old_format_channel.name}")
-                if old_format_channel.id in self.sb_channels:
-                    del self.sb_channels[old_format_channel.id]
+                self.sb_channels.pop(old_format_channel.id, None)
+                await cache.delete_sb_last_ping(old_format_channel.id)
                     
         except discord.NotFound:
             pass  # Channel already deleted
@@ -693,37 +731,36 @@ class JJIBot(commands.Bot):
                 await air_channel.edit(overwrites=overwrites)
                 self.logger.info(f"Developer {member} — SB #{next_num} channels set to private (connect=False)")
             
-            # Sergeant daily bonus - CLAIM BEFORE moving user
-            claimed = await db.claim_master_bonus(member.id)
-            if claimed:
-                bonus = config.get("salaries", {}).get("sergeant_master_bonus", 50)
-                
-                # Pay bonus atomically from budget (no tax on bonuses)
-                result = await db.pay_from_budget_atomic(
-                    discord_id=member.id,
-                    gross_amount=bonus,
-                    net_amount=bonus,  # No tax on bonus
-                    tax_amount=0,
-                    transaction_type=TransactionType.MASTER_BONUS,
-                    description="Daily Squadron Battle host bonus"
-                )
-                
-                if result["success"]:
-                    self.logger.info(f"Sergeant {member} claimed SB host bonus: ${bonus}")
-                    metrics.track_transaction("master_bonus")
-                    
-                    # DM the sergeant about their bonus
-                    try:
-                        dm_embed = discord.Embed(
-                            title="🎖️ Squadron Battle Host Bonus!",
-                            description=f"You received **{format_balance(bonus)}** for hosting Squadron Battles today!",
-                            color=0x00FF00
-                        )
-                        await member.send(embed=dm_embed)
-                    except Exception:
-                        pass
+            # Sergeant daily bonus - atomic claim+payout (no flag set if payout fails)
+            bonus = config.get("salaries", {}).get("sergeant_master_bonus", 50)
+            result = await db.claim_master_bonus_atomic(
+                discord_id=member.id,
+                bonus_amount=bonus,
+                description="Daily Squadron Battle host bonus",
+            )
+
+            if result["success"]:
+                self.logger.info(f"Sergeant {member} claimed SB host bonus: ${bonus}")
+                metrics.track_transaction("master_bonus")
+
+                # DM the sergeant about their bonus
+                try:
+                    dm_embed = discord.Embed(
+                        title="🎖️ Squadron Battle Host Bonus!",
+                        description=f"You received **{format_balance(bonus)}** for hosting Squadron Battles today!",
+                        color=0x00FF00
+                    )
+                    await member.send(embed=dm_embed)
+                except Exception:
+                    pass
+            else:
+                err = result.get("error")
+                if err == "already_claimed":
+                    pass  # silent — already paid today
+                elif err == "no_active_master_session":
+                    self.logger.debug(f"SB bonus skipped for {member}: no active master session")
                 else:
-                    self.logger.warning(f"Failed to pay SB bonus to {member}: {result.get('error')}")
+                    self.logger.warning(f"Failed to pay SB bonus to {member}: {err}")
             
             # Move the sergeant to the ground channel by default (AFTER claiming bonus)
             await member.move_to(ground_channel, reason="Moved to new Squadron Battle Ground channel")
@@ -781,8 +818,9 @@ class JJIBot(commands.Bot):
                         )
                         
                         # Register both channels in tracker
+                        now_ts = datetime.now(timezone.utc)
                         self.sb_channels[ground_channel.id] = {
-                            "last_ping": datetime.now(timezone.utc),
+                            "last_ping": now_ts,
                             "commander_id": member.id,
                             "last_status": "initial",
                             "squad_num": next_num,
@@ -790,13 +828,16 @@ class JJIBot(commands.Bot):
                             "paired_id": air_channel.id
                         }
                         self.sb_channels[air_channel.id] = {
-                            "last_ping": datetime.now(timezone.utc),
+                            "last_ping": now_ts,
                             "commander_id": member.id,
                             "last_status": "initial",
                             "squad_num": next_num,
                             "type": "air",
                             "paired_id": ground_channel.id
                         }
+                        # Persist for restart recovery
+                        await cache.set_sb_last_ping(ground_channel.id, now_ts.timestamp())
+                        await cache.set_sb_last_ping(air_channel.id, now_ts.timestamp())
                 except Exception as e:
                     self.logger.error(f"Failed to send SB ping: {e}")
                         
@@ -1124,14 +1165,16 @@ class JJIBot(commands.Bot):
                 # Select the role with maximum rate
                 rate, role_name = max(role_rates, key=lambda x: x[0])
 
-                # Check budget before paying
-                if remaining_budget < rate:
-                    self.logger.warning(f"Server budget depleted! Stopping salary distribution. Remaining: {remaining_budget}")
-                    break
-
-                # Apply salary tax
+                # Apply salary tax (compute first so budget check uses the
+                # actual outflow — net amount — instead of gross rate)
                 tax_amount = rate * (economy.tax_rate / 100)
                 net_salary = rate - tax_amount
+
+                # Check budget BEFORE paying. We compare against net_salary
+                # because that's what really leaves the budget; tax stays in.
+                if remaining_budget < net_salary:
+                    self.logger.warning(f"Server budget depleted! Stopping salary distribution. Remaining: {remaining_budget}")
+                    break
 
                 user_before = user.balance
 
@@ -1344,11 +1387,13 @@ class JJIBot(commands.Bot):
                 
                 # Skip empty squadrons (will be deleted by voice_state_update)
                 if member_count == 0:
-                    # Clean up tracking
-                    if ground_ch and ground_ch.id in self.sb_channels:
-                        del self.sb_channels[ground_ch.id]
-                    if air_ch and air_ch.id in self.sb_channels:
-                        del self.sb_channels[air_ch.id]
+                    # Clean up tracking (race-safe)
+                    if ground_ch:
+                        self.sb_channels.pop(ground_ch.id, None)
+                        await cache.delete_sb_last_ping(ground_ch.id)
+                    if air_ch:
+                        self.sb_channels.pop(air_ch.id, None)
+                        await cache.delete_sb_last_ping(air_ch.id)
                     continue
                 
                 # Use ground channel id for tracking (or air if no ground)
@@ -1363,14 +1408,30 @@ class JJIBot(commands.Bot):
                     if air_ch:
                         all_members.extend(air_ch.members)
                     commander = all_members[0] if all_members else None
-                    
+
+                    # Restore last_ping from Redis if the bot restarted while
+                    # this squadron was active. Falls back to ``now`` (skips
+                    # the first iteration so no spam ping right after start).
+                    persisted_ts = await cache.get_sb_last_ping(tracking_id)
+                    restored_last_ping = (
+                        datetime.fromtimestamp(persisted_ts, tz=timezone.utc)
+                        if persisted_ts is not None
+                        else now
+                    )
+
                     self.sb_channels[tracking_id] = {
-                        "last_ping": now,
+                        "last_ping": restored_last_ping,
                         "commander_id": commander.id if commander else None,
                         "last_status": "initial",
                         "squad_num": squad_num
                     }
-                    continue  # Skip first check, let initial message work
+                    if persisted_ts is None:
+                        # First time we see this squadron in this process —
+                        # seed Redis and skip ping this tick.
+                        await cache.set_sb_last_ping(tracking_id, now.timestamp())
+                        continue
+                    # Otherwise fall through and let the regular interval
+                    # check below decide whether to ping.
                 
                 tracking = self.sb_channels[tracking_id]
                 last_ping = tracking.get("last_ping", now)
@@ -1425,6 +1486,7 @@ class JJIBot(commands.Bot):
                         
                         tracking["last_ping"] = now
                         tracking["last_status"] = "recruiting"
+                        await cache.set_sb_last_ping(tracking_id, now.timestamp())
                         self.logger.debug(f"SB ping: Squadron #{squad_num} needs {needed} more")
                 
                 else:
@@ -1465,6 +1527,7 @@ class JJIBot(commands.Bot):
                         
                         tracking["last_ping"] = now
                         tracking["last_status"] = "full"
+                        await cache.set_sb_last_ping(tracking_id, now.timestamp())
                         self.logger.debug(f"SB standby: Squadron #{squad_num} is full")
             
             # Clean up tracking for deleted channels
@@ -1477,7 +1540,8 @@ class JJIBot(commands.Bot):
             
             for channel_id in list(self.sb_channels.keys()):
                 if channel_id not in active_ids:
-                    del self.sb_channels[channel_id]
+                    self.sb_channels.pop(channel_id, None)
+                    await cache.delete_sb_last_ping(channel_id)
                     
         except Exception as e:
             self.logger.error(f"SB monitor error: {e}")

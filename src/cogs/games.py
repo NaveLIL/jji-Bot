@@ -1245,7 +1245,9 @@ class GamesCog(commands.Cog):
         await asyncio.sleep(0.5)
         
         game_config = self.config.get("games", {}).get("coinflip", {})
-        edge_chance = game_config.get("edge_chance", 0.005)
+        # Note: flip() expects edge_chance as a percentage (0.5 == 0.5%).
+        # The default must match config.json's documented format.
+        edge_chance = game_config.get("edge_chance", 0.5)
         result = game.flip(edge_chance)
         
         if result == CoinflipResult.WIN:

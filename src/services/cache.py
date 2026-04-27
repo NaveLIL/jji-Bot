@@ -220,6 +220,40 @@ class RedisService:
         except Exception:
             return False, None
     
+    # ==================== SB CHANNEL TRACKING ====================
+
+    async def set_sb_last_ping(self, channel_id: int, ts: float, ttl: int = 6 * 3600) -> None:
+        """Persist the last-ping timestamp (unix seconds) for an SB channel.
+
+        TTL defaults to 6h so stale entries are auto-evicted.
+        """
+        if not self._connected:
+            return
+        try:
+            await self.redis.setex(f"sb:last_ping:{channel_id}", ttl, str(ts))
+        except Exception:
+            pass
+
+    async def get_sb_last_ping(self, channel_id: int) -> Optional[float]:
+        """Return the persisted last-ping unix timestamp or ``None``."""
+        if not self._connected:
+            return None
+        try:
+            raw = await self.redis.get(f"sb:last_ping:{channel_id}")
+            if raw is None:
+                return None
+            return float(raw)
+        except Exception:
+            return None
+
+    async def delete_sb_last_ping(self, channel_id: int) -> None:
+        if not self._connected:
+            return
+        try:
+            await self.redis.delete(f"sb:last_ping:{channel_id}")
+        except Exception:
+            pass
+
     # ==================== USER BLACKLIST ====================
     
     async def blacklist_user(
