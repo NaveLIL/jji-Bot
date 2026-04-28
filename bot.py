@@ -232,6 +232,7 @@ class SBDmPingConfirmView(discord.ui.View):
         guild = interaction.guild
         delivered = 0
         failed = 0
+        failed_users: list[tuple[discord.Member, str]] = []
 
         dm_embed = discord.Embed(
             title=f"📢 Squadron #{self.squad_num} — Join Now!",
@@ -254,8 +255,15 @@ class SBDmPingConfirmView(discord.ui.View):
             try:
                 await target.send(embed=dm_embed)
                 delivered += 1
-            except Exception:
+            except discord.Forbidden:
                 failed += 1
+                failed_users.append((target, "ЛС закрыты / бот заблокирован"))
+            except discord.HTTPException as e:
+                failed += 1
+                failed_users.append((target, f"HTTP {e.status}"))
+            except Exception as e:
+                failed += 1
+                failed_users.append((target, str(e)[:60]))
 
             if i % 5 == 0:
                 try:
@@ -272,6 +280,30 @@ class SBDmPingConfirmView(discord.ui.View):
             description=f"✅ Delivered: **{delivered}**\n❌ Failed: **{failed}**",
             color=0x2ECC71 if failed == 0 else 0xFFAA00,
         )
+        if failed_users:
+            # Build failed list, chunk into 1024-char fields (embed field limit)
+            lines = []
+            for member, reason in failed_users:
+                roles = [r.name for r in member.roles if r.name != "@everyone"]
+                role_str = f" `[{', '.join(roles[-2:])}]`" if roles else ""
+                lines.append(f"• {member.mention} **{member.display_name}**{role_str} — {reason}")
+
+            # Split into chunks of max 1024 chars
+            chunks: list[str] = []
+            current = ""
+            for line in lines:
+                if len(current) + len(line) + 1 > 1024:
+                    chunks.append(current)
+                    current = line
+                else:
+                    current = f"{current}\n{line}" if current else line
+            if current:
+                chunks.append(current)
+
+            for idx, chunk in enumerate(chunks):
+                field_name = "❌ Не доставлено" if idx == 0 else "\u200b"
+                report.add_field(name=field_name, value=chunk, inline=False)
+
         report.set_footer(text=get_standard_footer())
         await interaction.edit_original_response(embed=report, view=None)
         _bot_logger.info(f"DM ping SB #{self.squad_num}: {delivered} delivered, {failed} failed (by {self.sender})")
