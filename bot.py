@@ -257,7 +257,7 @@ class SBDmPingConfirmView(discord.ui.View):
                 delivered += 1
             except discord.Forbidden:
                 failed += 1
-                failed_users.append((target, "ЛС закрыты / бот заблокирован"))
+                failed_users.append((target, "DMs closed / bot blocked"))
             except discord.HTTPException as e:
                 failed += 1
                 failed_users.append((target, f"HTTP {e.status}"))
@@ -301,7 +301,7 @@ class SBDmPingConfirmView(discord.ui.View):
                 chunks.append(current)
 
             for idx, chunk in enumerate(chunks):
-                field_name = "❌ Не доставлено" if idx == 0 else "\u200b"
+                field_name = "❌ Failed to deliver" if idx == 0 else "\u200b"
                 report.add_field(name=field_name, value=chunk, inline=False)
 
         report.set_footer(text=get_standard_footer())
